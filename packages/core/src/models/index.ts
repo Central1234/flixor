@@ -75,3 +75,59 @@ export type {
   TMDBBrowseKind,
   TraktBrowseKind,
 } from './browse';
+
+// Jellyfin/Emby models
+export type {
+  JellyfinAuthResult,
+  JellyfinUser,
+  JellyfinUserPolicy,
+  JellyfinUserConfiguration,
+  JellyfinSessionInfo,
+  JellyfinPlayState,
+  JellyfinServer,
+  JellyfinServerInfo,
+  JellyfinPublicInfo,
+  JellyfinLibrary,
+  JellyfinLibraryOptions,
+  JellyfinMediaItem,
+  JellyfinItemType,
+  JellyfinUserItemData,
+  JellyfinMediaSource,
+  JellyfinMediaStream,
+  JellyfinChapter,
+  JellyfinPerson,
+  JellyfinQueryResult,
+  JellyfinResumeItem,
+  JellyfinImageType,
+  JellyfinPlaybackStart,
+  JellyfinPlaybackProgress,
+  JellyfinPlaybackStop,
+  JellyfinMediaSegment,
+} from './jellyfin';
+
+// Unified Media Server models
+export type {
+  MediaServerType,
+  MediaServerAuth,
+  MediaServerInfo,
+  MediaLibrary,
+  MediaLibraryType,
+  MediaItem,
+  MediaItemType,
+  MediaInfo,
+  MediaPart,
+  MediaStream,
+  MediaMarker,
+  LibraryQueryOptions,
+  LibraryQueryResult,
+  PlaybackSession,
+  IMediaServerService,
+  IMediaServerAuth,
+} from './mediaserver';
+
+export {
+  ticksToMs,
+  msToTicks,
+  normalizeLibraryType,
+  normalizeMediaItemType,
+} from './mediaserver';

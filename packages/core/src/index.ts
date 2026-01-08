@@ -13,6 +13,10 @@ export {
   PlexAuthService,
   PlexServerService,
   PlexTvService,
+  JellyfinAuthService,
+  JellyfinServerService,
+  EmbyAuthService,
+  EmbyServerService,
   TMDBService,
   TraktService,
 } from './services';
@@ -94,3 +98,51 @@ export type {
   TMDBBrowseKind,
   TraktBrowseKind,
 } from './models/browse';
+
+// Models - Jellyfin/Emby
+export type {
+  JellyfinAuthResult,
+  JellyfinUser,
+  JellyfinServer,
+  JellyfinServerInfo,
+  JellyfinPublicInfo,
+  JellyfinLibrary,
+  JellyfinMediaItem,
+  JellyfinItemType,
+  JellyfinUserItemData,
+  JellyfinMediaSource,
+  JellyfinMediaStream,
+  JellyfinChapter,
+  JellyfinQueryResult,
+  JellyfinPlaybackStart,
+  JellyfinPlaybackProgress,
+  JellyfinPlaybackStop,
+  JellyfinMediaSegment,
+} from './models/jellyfin';
+
+// Models - Unified Media Server
+export type {
+  MediaServerType,
+  MediaServerAuth,
+  MediaServerInfo,
+  MediaLibrary,
+  MediaLibraryType,
+  MediaItem,
+  MediaItemType,
+  MediaInfo,
+  MediaPart,
+  MediaStream,
+  MediaMarker,
+  LibraryQueryOptions,
+  LibraryQueryResult,
+  PlaybackSession,
+  IMediaServerService,
+  IMediaServerAuth,
+} from './models/mediaserver';
+
+export {
+  ticksToMs,
+  msToTicks,
+  normalizeLibraryType,
+  normalizeMediaItemType,
+} from './models/mediaserver';

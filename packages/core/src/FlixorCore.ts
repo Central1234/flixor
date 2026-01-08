@@ -4,9 +4,20 @@ import type { ICache } from './storage/ICache';
 import { PlexAuthService } from './services/PlexAuthService';
 import { PlexServerService } from './services/PlexServerService';
 import { PlexTvService } from './services/PlexTvService';
+import { JellyfinAuthService } from './services/JellyfinAuthService';
+import { JellyfinServerService } from './services/JellyfinServerService';
+import { EmbyAuthService } from './services/EmbyAuthService';
+import { EmbyServerService } from './services/EmbyServerService';
 import { TMDBService } from './services/TMDBService';
 import { TraktService } from './services/TraktService';
 import type { PlexServer, PlexConnection } from './models/plex';
+import type { JellyfinServer } from './models/jellyfin';
+import type {
+  MediaServerType,
+  MediaServerAuth,
+  MediaServerInfo,
+  IMediaServerService,
+} from './models/mediaserver';
 
 export interface FlixorCoreConfig {
   // Platform bindings
@@ -36,6 +47,19 @@ interface StoredPlexAuth {
   connection: PlexConnection;
 }
 
+interface StoredJellyfinAuth {
+  type: 'jellyfin' | 'emby';
+  auth: MediaServerAuth;
+  server: JellyfinServer;
+}
+
+interface StoredMediaServerAuth {
+  type: MediaServerType;
+  plex?: StoredPlexAuth;
+  jellyfin?: StoredJellyfinAuth;
+  emby?: StoredJellyfinAuth;
+}
+
 /**
  * Main entry point for Flixor Core
  * Initializes and manages all services with platform-specific storage bindings
@@ -45,6 +69,10 @@ export class FlixorCore {
   private _plexAuth: PlexAuthService;
   private _plexServer: PlexServerService | null = null;
   private _plexTv: PlexTvService | null = null;
+  private _jellyfinAuth: JellyfinAuthService;
+  private _jellyfinServer: JellyfinServerService | null = null;
+  private _embyAuth: EmbyAuthService;
+  private _embyServer: EmbyServerService | null = null;
   private _tmdb: TMDBService;
   private _trakt: TraktService;
 
@@ -52,6 +80,15 @@ export class FlixorCore {
   private plexToken: string | null = null;
   private currentServer: PlexServer | null = null;
   private currentConnection: PlexConnection | null = null;
+
+  // Current Jellyfin/Emby state
+  private jellyfinAuth: MediaServerAuth | null = null;
+  private jellyfinServer: JellyfinServer | null = null;
+  private embyAuth: MediaServerAuth | null = null;
+  private embyServer: JellyfinServer | null = null;
+
+  // Active media server type
+  private _activeServerType: MediaServerType | null = null;
 
   constructor(config: FlixorCoreConfig) {
     this.config = config;
@@ -62,6 +99,22 @@ export class FlixorCore {
       productName: config.productName,
       productVersion: config.productVersion,
       platform: config.platform,
+      deviceName: config.deviceName,
+    });
+
+    // Initialize Jellyfin Auth Service (always available)
+    this._jellyfinAuth = new JellyfinAuthService({
+      deviceId: config.clientId,
+      clientName: config.productName,
+      clientVersion: config.productVersion,
+      deviceName: config.deviceName,
+    });
+
+    // Initialize Emby Auth Service (always available)
+    this._embyAuth = new EmbyAuthService({
+      deviceId: config.clientId,
+      clientName: config.productName,
+      clientVersion: config.productVersion,
       deviceName: config.deviceName,
     });
 
@@ -126,6 +179,73 @@ export class FlixorCore {
     return this._trakt;
   }
 
+  /**
+   * Get Jellyfin Auth service
+   */
+  get jellyfinAuthService(): JellyfinAuthService {
+    return this._jellyfinAuth;
+  }
+
+  /**
+   * Get Jellyfin Server service (requires active connection)
+   */
+  get jellyfinServerService(): JellyfinServerService {
+    if (!this._jellyfinServer) {
+      throw new Error('Jellyfin server not connected. Call connectToJellyfinServer first.');
+    }
+    return this._jellyfinServer;
+  }
+
+  /**
+   * Get Emby Auth service
+   */
+  get embyAuthService(): EmbyAuthService {
+    return this._embyAuth;
+  }
+
+  /**
+   * Get Emby Server service (requires active connection)
+   */
+  get embyServerService(): EmbyServerService {
+    if (!this._embyServer) {
+      throw new Error('Emby server not connected. Call connectToEmbyServer first.');
+    }
+    return this._embyServer;
+  }
+
+  /**
+   * Get the active media server type
+   */
+  get activeServerType(): MediaServerType | null {
+    return this._activeServerType;
+  }
+
+  /**
+   * Get the currently active media server service (unified interface)
+   * Returns the service for whichever server type is currently active
+   */
+  get activeMediaServer(): IMediaServerService | null {
+    switch (this._activeServerType) {
+      case 'plex':
+        return this._plexServer;
+      case 'jellyfin':
+        return this._jellyfinServer;
+      case 'emby':
+        return this._embyServer;
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Check if any media server is connected
+   */
+  get isMediaServerConnected(): boolean {
+    return this._plexServer !== null || 
+           this._jellyfinServer !== null || 
+           this._embyServer !== null;
+  }
+
   // ============================================
   // Plex Authentication & Connection
   // ============================================
@@ -177,13 +297,15 @@ export class FlixorCore {
    * Initialize - restore session from storage
    */
   async initialize(): Promise<boolean> {
-    // Restore Plex session
+    // Try to restore any media server session
     const plexRestored = await this.restorePlexSession();
+    const jellyfinRestored = await this.restoreJellyfinSession();
+    const embyRestored = await this.restoreEmbySession();
 
     // Initialize Trakt (restore tokens)
     await this._trakt.initialize();
 
-    return plexRestored;
+    return plexRestored || jellyfinRestored || embyRestored;
   }
 
   /**
@@ -225,6 +347,85 @@ export class FlixorCore {
         cache: this.config.cache,
       });
 
+      this._activeServerType = 'plex';
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Restore Jellyfin session from secure storage
+   */
+  private async restoreJellyfinSession(): Promise<boolean> {
+    try {
+      const stored = await this.config.secureStorage.get<StoredJellyfinAuth>('jellyfin_auth');
+
+      if (!stored || stored.type !== 'jellyfin') {
+        return false;
+      }
+
+      // Verify auth is still valid
+      const isValid = await this._jellyfinAuth.validateAuth(stored.auth);
+      if (!isValid) {
+        await this.config.secureStorage.remove('jellyfin_auth');
+        return false;
+      }
+
+      // Restore state
+      this.jellyfinAuth = stored.auth;
+      this.jellyfinServer = stored.server;
+
+      // Initialize server service
+      this._jellyfinServer = new JellyfinServerService({
+        server: stored.server,
+        deviceId: this.config.clientId,
+        clientName: this.config.productName,
+        clientVersion: this.config.productVersion,
+        deviceName: this.config.deviceName,
+        cache: this.config.cache,
+      });
+
+      this._activeServerType = 'jellyfin';
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Restore Emby session from secure storage
+   */
+  private async restoreEmbySession(): Promise<boolean> {
+    try {
+      const stored = await this.config.secureStorage.get<StoredJellyfinAuth>('emby_auth');
+
+      if (!stored || stored.type !== 'emby') {
+        return false;
+      }
+
+      // Verify auth is still valid
+      const isValid = await this._embyAuth.validateAuth(stored.auth);
+      if (!isValid) {
+        await this.config.secureStorage.remove('emby_auth');
+        return false;
+      }
+
+      // Restore state
+      this.embyAuth = stored.auth;
+      this.embyServer = stored.server;
+
+      // Initialize server service
+      this._embyServer = new EmbyServerService({
+        server: stored.server,
+        deviceId: this.config.clientId,
+        clientName: this.config.productName,
+        clientVersion: this.config.productVersion,
+        deviceName: this.config.deviceName,
+        cache: this.config.cache,
+      });
+
+      this._activeServerType = 'emby';
       return true;
     } catch {
       return false;
@@ -299,6 +500,9 @@ export class FlixorCore {
       cache: this.config.cache,
     });
 
+    // Set as active server
+    this._activeServerType = 'plex';
+
     // Persist to secure storage
     await this.config.secureStorage.set<StoredPlexAuth>('plex_auth', {
       token: this.plexToken,
@@ -324,10 +528,286 @@ export class FlixorCore {
     this._plexTv = null;
     this._plexServer = null;
 
+    if (this._activeServerType === 'plex') {
+      this._activeServerType = null;
+    }
+
     // Clear storage
     await this.config.secureStorage.remove('plex_auth');
     await this.config.cache.invalidatePattern('plex:*');
     await this.config.cache.invalidatePattern('plextv:*');
+  }
+
+  // ============================================
+  // Jellyfin Authentication & Connection
+  // ============================================
+
+  /**
+   * Check if Jellyfin is authenticated
+   */
+  get isJellyfinAuthenticated(): boolean {
+    return this.jellyfinAuth !== null;
+  }
+
+  /**
+   * Check if connected to a Jellyfin server
+   */
+  get isJellyfinServerConnected(): boolean {
+    return this._jellyfinServer !== null;
+  }
+
+  /**
+   * Test connection to a Jellyfin server
+   */
+  async testJellyfinConnection(address: string): Promise<MediaServerInfo | null> {
+    return this._jellyfinAuth.testConnection(address);
+  }
+
+  /**
+   * Authenticate with Jellyfin using username/password
+   */
+  async authenticateJellyfin(options: {
+    address: string;
+    username: string;
+    password: string;
+  }): Promise<MediaServerAuth> {
+    const auth = await this._jellyfinAuth.authenticate(options);
+    
+    // Create server object
+    const server: JellyfinServer = {
+      id: auth.serverId,
+      name: auth.serverName,
+      address: auth.serverAddress,
+      accessToken: auth.accessToken,
+      userId: auth.userId,
+    };
+
+    // Store state
+    this.jellyfinAuth = auth;
+    this.jellyfinServer = server;
+
+    // Initialize server service
+    this._jellyfinServer = new JellyfinServerService({
+      server,
+      deviceId: this.config.clientId,
+      clientName: this.config.productName,
+      clientVersion: this.config.productVersion,
+      deviceName: this.config.deviceName,
+      cache: this.config.cache,
+    });
+
+    // Set as active server
+    this._activeServerType = 'jellyfin';
+
+    // Persist to secure storage
+    await this.config.secureStorage.set<StoredJellyfinAuth>('jellyfin_auth', {
+      type: 'jellyfin',
+      auth,
+      server,
+    });
+
+    return auth;
+  }
+
+  /**
+   * Authenticate with Jellyfin using API key
+   */
+  async authenticateJellyfinWithApiKey(options: {
+    address: string;
+    apiKey: string;
+  }): Promise<MediaServerAuth> {
+    const auth = await this._jellyfinAuth.authenticateWithApiKey(options);
+    
+    const server: JellyfinServer = {
+      id: auth.serverId,
+      name: auth.serverName,
+      address: auth.serverAddress,
+      accessToken: auth.accessToken,
+      userId: auth.userId,
+    };
+
+    this.jellyfinAuth = auth;
+    this.jellyfinServer = server;
+
+    this._jellyfinServer = new JellyfinServerService({
+      server,
+      deviceId: this.config.clientId,
+      clientName: this.config.productName,
+      clientVersion: this.config.productVersion,
+      deviceName: this.config.deviceName,
+      cache: this.config.cache,
+    });
+
+    this._activeServerType = 'jellyfin';
+
+    await this.config.secureStorage.set<StoredJellyfinAuth>('jellyfin_auth', {
+      type: 'jellyfin',
+      auth,
+      server,
+    });
+
+    return auth;
+  }
+
+  /**
+   * Sign out from Jellyfin
+   */
+  async signOutJellyfin(): Promise<void> {
+    if (this.jellyfinAuth) {
+      await this._jellyfinAuth.signOut(this.jellyfinAuth);
+    }
+
+    // Clear state
+    this.jellyfinAuth = null;
+    this.jellyfinServer = null;
+    this._jellyfinServer = null;
+
+    if (this._activeServerType === 'jellyfin') {
+      this._activeServerType = null;
+    }
+
+    // Clear storage
+    await this.config.secureStorage.remove('jellyfin_auth');
+    await this.config.cache.invalidatePattern('jellyfin:*');
+  }
+
+  // ============================================
+  // Emby Authentication & Connection
+  // ============================================
+
+  /**
+   * Check if Emby is authenticated
+   */
+  get isEmbyAuthenticated(): boolean {
+    return this.embyAuth !== null;
+  }
+
+  /**
+   * Check if connected to an Emby server
+   */
+  get isEmbyServerConnected(): boolean {
+    return this._embyServer !== null;
+  }
+
+  /**
+   * Test connection to an Emby server
+   */
+  async testEmbyConnection(address: string): Promise<MediaServerInfo | null> {
+    return this._embyAuth.testConnection(address);
+  }
+
+  /**
+   * Authenticate with Emby using username/password
+   */
+  async authenticateEmby(options: {
+    address: string;
+    username: string;
+    password: string;
+  }): Promise<MediaServerAuth> {
+    const auth = await this._embyAuth.authenticate(options);
+    
+    const server: JellyfinServer = {
+      id: auth.serverId,
+      name: auth.serverName,
+      address: auth.serverAddress,
+      accessToken: auth.accessToken,
+      userId: auth.userId,
+      productName: 'Emby',
+    };
+
+    this.embyAuth = auth;
+    this.embyServer = server;
+
+    this._embyServer = new EmbyServerService({
+      server,
+      deviceId: this.config.clientId,
+      clientName: this.config.productName,
+      clientVersion: this.config.productVersion,
+      deviceName: this.config.deviceName,
+      cache: this.config.cache,
+    });
+
+    this._activeServerType = 'emby';
+
+    await this.config.secureStorage.set<StoredJellyfinAuth>('emby_auth', {
+      type: 'emby',
+      auth,
+      server,
+    });
+
+    return auth;
+  }
+
+  /**
+   * Authenticate with Emby using API key
+   */
+  async authenticateEmbyWithApiKey(options: {
+    address: string;
+    apiKey: string;
+  }): Promise<MediaServerAuth> {
+    const auth = await this._embyAuth.authenticateWithApiKey(options);
+    
+    const server: JellyfinServer = {
+      id: auth.serverId,
+      name: auth.serverName,
+      address: auth.serverAddress,
+      accessToken: auth.accessToken,
+      userId: auth.userId,
+      productName: 'Emby',
+    };
+
+    this.embyAuth = auth;
+    this.embyServer = server;
+
+    this._embyServer = new EmbyServerService({
+      server,
+      deviceId: this.config.clientId,
+      clientName: this.config.productName,
+      clientVersion: this.config.productVersion,
+      deviceName: this.config.deviceName,
+      cache: this.config.cache,
+    });
+
+    this._activeServerType = 'emby';
+
+    await this.config.secureStorage.set<StoredJellyfinAuth>('emby_auth', {
+      type: 'emby',
+      auth,
+      server,
+    });
+
+    return auth;
+  }
+
+  /**
+   * Sign out from Emby
+   */
+  async signOutEmby(): Promise<void> {
+    if (this.embyAuth) {
+      await this._embyAuth.signOut(this.embyAuth);
+    }
+
+    // Clear state
+    this.embyAuth = null;
+    this.embyServer = null;
+    this._embyServer = null;
+
+    if (this._activeServerType === 'emby') {
+      this._activeServerType = null;
+    }
+
+    // Clear storage
+    await this.config.secureStorage.remove('emby_auth');
+    await this.config.cache.invalidatePattern('emby:*');
+  }
+
+  /**
+   * Sign out from all media servers
+   */
+  async signOutAllMediaServers(): Promise<void> {
+    await this.signOutPlex();
+    await this.signOutJellyfin();
+    await this.signOutEmby();
   }
 
   // ============================================
@@ -382,6 +862,29 @@ export class FlixorCore {
   async clearPlexCache(): Promise<void> {
     await this.config.cache.invalidatePattern('plex:*');
     await this.config.cache.invalidatePattern('plextv:*');
+  }
+
+  /**
+   * Clear Jellyfin cache
+   */
+  async clearJellyfinCache(): Promise<void> {
+    await this.config.cache.invalidatePattern('jellyfin:*');
+  }
+
+  /**
+   * Clear Emby cache
+   */
+  async clearEmbyCache(): Promise<void> {
+    await this.config.cache.invalidatePattern('emby:*');
+  }
+
+  /**
+   * Clear all media server caches
+   */
+  async clearMediaServerCaches(): Promise<void> {
+    await this.clearPlexCache();
+    await this.clearJellyfinCache();
+    await this.clearEmbyCache();
   }
 
   /**

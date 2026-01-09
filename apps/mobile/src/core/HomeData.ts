@@ -105,13 +105,15 @@ export async function fetchTmdbTrendingMoviesWeek(): Promise<RowItem[]> {
 }
 
 // ============================================
-// Plex Data
+// Media Server Data (Unified for Plex/Jellyfin/Emby)
 // ============================================
+
+import { getFlixorMobile } from './FlixorMobile';
 
 export async function fetchContinueWatching(): Promise<PlexMediaItem[]> {
   try {
-    const core = getFlixorCore();
-    return await core.plexServer.getContinueWatching();
+    const mobile = getFlixorMobile();
+    return await mobile.getContinueWatching();
   } catch (e) {
     console.log('[HomeData] fetchContinueWatching error:', e);
     return [];
@@ -120,8 +122,8 @@ export async function fetchContinueWatching(): Promise<PlexMediaItem[]> {
 
 export async function fetchRecentlyAdded(): Promise<PlexMediaItem[]> {
   try {
-    const core = getFlixorCore();
-    return await core.plexServer.getRecentlyAdded();
+    const mobile = getFlixorMobile();
+    return await mobile.getRecentlyAdded();
   } catch (e) {
     console.log('[HomeData] fetchRecentlyAdded error:', e);
     return [];
@@ -130,10 +132,8 @@ export async function fetchRecentlyAdded(): Promise<PlexMediaItem[]> {
 
 export function getPlexImageUrl(item: PlexMediaItem, width: number = 300): string {
   try {
-    const core = getFlixorCore();
-    const path = item.thumb || item.art;
-    if (!path) return '';
-    return core.plexServer.getImageUrl(path, width);
+    const mobile = getFlixorMobile();
+    return mobile.getImageUrl(item, width);
   } catch {
     return '';
   }
@@ -141,6 +141,15 @@ export function getPlexImageUrl(item: PlexMediaItem, width: number = 300): strin
 
 export function getContinueWatchingImageUrl(item: PlexMediaItem, width: number = 300): string {
   try {
+    const mobile = getFlixorMobile();
+    const source = (item as any)._source;
+    
+    // For Jellyfin/Emby, the item already has proper image info
+    if (source === 'jellyfin' || source === 'emby') {
+      return mobile.getImageUrl(item, width);
+    }
+    
+    // For Plex, prefer show poster for episodes
     const core = getFlixorCore();
     const path =
       item.type === 'episode'
@@ -669,10 +678,21 @@ export async function getUltraBlurColors(
 export async function getUsername(): Promise<string> {
   try {
     const core = getFlixorCore();
-    const token = (core as any).plexToken;
-    if (token) {
-      const user = await core.plexAuth.getUser(token);
-      return user?.username || 'User';
+    const serverType = core.activeServerType;
+    
+    if (serverType === 'jellyfin') {
+      const auth = (core as any).jellyfinAuth;
+      return auth?.username || auth?.user?.Name || 'User';
+    } else if (serverType === 'emby') {
+      const auth = (core as any).embyAuth;
+      return auth?.username || auth?.user?.Name || 'User';
+    } else {
+      // Plex
+      const token = (core as any).plexToken;
+      if (token) {
+        const user = await core.plexAuth.getUser(token);
+        return user?.username || 'User';
+      }
     }
     return 'User';
   } catch {

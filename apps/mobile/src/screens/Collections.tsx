@@ -31,7 +31,7 @@ type ViewMode = 'collections' | 'items';
 export default function Collections() {
   const nav: any = useNavigation();
   const route = useRoute();
-  const { isLoading: flixorLoading, isConnected } = useFlixor();
+  const { isLoading: flixorLoading, isConnected, serverType } = useFlixor();
 
   const [viewMode, setViewMode] = useState<ViewMode>('collections');
   const [collections, setCollections] = useState<CollectionItem[]>([]);
@@ -251,7 +251,7 @@ export default function Collections() {
               <Ionicons name="albums-outline" size={48} color="#444" />
               <Text style={styles.emptyText}>No collections found</Text>
               <Text style={styles.emptySubtext}>
-                Create collections in Plex to organize your media
+                Create collections to organize your media
               </Text>
             </View>
           }
@@ -272,7 +272,7 @@ export default function Collections() {
                   item={item}
                   size={Math.floor((Dimensions.get('window').width - 24 - 2 * 8) / 3)}
                   onPress={() =>
-                    nav.navigate('Details', { type: 'plex', ratingKey: item.ratingKey })
+                    nav.navigate('Details', { type: serverType || 'plex', ratingKey: item.ratingKey })
                   }
                 />
               )}

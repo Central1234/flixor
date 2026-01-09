@@ -49,7 +49,7 @@ import {
 import FastImage from '@d11/react-native-fast-image';
 
 type DetailsParams = {
-  type: 'plex' | 'tmdb';
+  type: 'plex' | 'jellyfin' | 'emby' | 'tmdb';
   ratingKey?: string;
   mediaType?: 'movie' | 'tv';
   id?: string;
@@ -190,6 +190,60 @@ export default function Details({ route }: RouteParams) {
 
     (async () => {
       console.log('[Details] useEffect starting...');
+
+      // Handle Jellyfin/Emby types - treat them like Plex for now
+      // They use the same ratingKey (itemId) pattern
+      if ((params.type === 'jellyfin' || params.type === 'emby') && params.ratingKey) {
+        try {
+          // For Jellyfin/Emby, fetch metadata from the appropriate server
+          // Use the unified DetailsData functions which will check server type
+          const m = await fetchPlexMetadata(params.ratingKey);
+          if (!m) {
+            setLoading(false);
+            return;
+          }
+          const next: any = { ...m };
+          setMatchedPlex(true); // Reuse this flag to indicate we have local source
+          setMappedRk(String(params.ratingKey));
+
+          // Try to get TMDB info for logo and credits
+          const tmdbId = extractTmdbIdFromGuids(m?.Guid || []) || (m as any)?.tmdbId;
+          if (tmdbId) {
+            const mediaType = m?.type === 'movie' ? 'movie' : 'tv';
+            const logo = await fetchTmdbLogo(mediaType, Number(tmdbId));
+            if (logo) next.logoUrl = logo;
+
+            try {
+              const credits = await fetchTmdbCredits(mediaType, Number(tmdbId));
+              setTmdbCast(credits.cast.map((c: any) => ({ id: c.id, name: c.name, profile_path: c.profile_path })));
+              setTmdbCrew(credits.crew.map((c: any) => ({ name: c.name, job: c.job })));
+            } catch (e) {
+              console.log('[Details] Error fetching TMDB credits for Jellyfin/Emby content:', e);
+            }
+          }
+
+          setMeta(next);
+          setTab(next?.type === 'show' ? 'episodes' : 'suggested');
+          setLoading(false);
+
+          // Setup watchlist IDs
+          const tmdbIdStr = extractTmdbIdFromGuids(m?.Guid || []) || (m as any)?.tmdbId;
+          const imdbIdStr = extractImdbIdFromGuids(m?.Guid || []) || (m as any)?.imdbId;
+          if (imdbIdStr) setImdbId(imdbIdStr);
+          const ids: WatchlistIds = {
+            tmdbId: tmdbIdStr ? Number(tmdbIdStr) : undefined,
+            imdbId: imdbIdStr || undefined,
+            plexRatingKey: String(params.ratingKey),
+            mediaType: m?.type === 'movie' ? 'movie' : 'tv',
+          };
+          setWatchlistIds(ids);
+          checkWatchlistStatus(ids).then(setInWatchlist);
+        } catch (e) {
+          console.log('[Details] Jellyfin/Emby metadata error:', e);
+          setLoading(false);
+        }
+        return;
+      }
 
       // Handle Plex type (direct ratingKey)
       if (params.type === 'plex' && params.ratingKey) {

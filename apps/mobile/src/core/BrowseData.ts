@@ -1,11 +1,48 @@
 /**
  * Browse data fetchers for RowBrowseModal
  * Fetches paginated data based on BrowseContext
+ * Supports Plex, Jellyfin, and Emby servers
  */
 
 import { getFlixorCore } from './index';
 import type { BrowseContext, BrowseItem, BrowseResult } from '@flixor/core';
 import type { PlexMediaItem, TMDBMedia } from '@flixor/core';
+
+// Helper: Get image URL for any server type
+function getServerImageUrl(item: any, width: number = 300): string {
+  const core = getFlixorCore();
+  const serverType = core.activeServerType;
+  
+  if (serverType === 'jellyfin' && core.isJellyfinServerConnected) {
+    const itemId = item.id || item.Id || item.ratingKey;
+    if (itemId) {
+      return core.jellyfinServerService.getImageUrl(itemId, 'poster', { width });
+    }
+    return '';
+  } else if (serverType === 'emby' && core.isEmbyServerConnected) {
+    const itemId = item.id || item.Id || item.ratingKey;
+    if (itemId) {
+      return core.embyServerService.getImageUrl(itemId, 'poster', { width });
+    }
+    return '';
+  } else {
+    // Plex
+    const thumb = item.thumb;
+    if (thumb) {
+      return core.plexServer.getImageUrl(thumb, width);
+    }
+    return '';
+  }
+}
+
+// Helper: Get item ID prefix based on server type
+function getItemIdPrefix(): string {
+  const core = getFlixorCore();
+  const serverType = core.activeServerType;
+  if (serverType === 'jellyfin') return 'jellyfin:';
+  if (serverType === 'emby') return 'emby:';
+  return 'plex:';
+}
 
 // Helper: Parallel processing with concurrency limit
 async function withLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
@@ -26,19 +63,34 @@ const PAGE_SIZE = 20;
 
 /**
  * Fetch browse items for a given context and page
+ * Routes to appropriate server based on active server type
  */
 export async function fetchBrowseItems(
   context: BrowseContext,
   page: number = 1
 ): Promise<BrowseResult> {
   try {
+    const core = getFlixorCore();
+    const serverType = core.activeServerType;
+    
     switch (context.type) {
       case 'plexDirectory':
+        // For Jellyfin/Emby, map directory paths to library browsing
+        if (serverType === 'jellyfin' || serverType === 'emby') {
+          return fetchMediaServerLibrary(context.path, page);
+        }
         return fetchPlexDirectory(context.path, page);
       case 'plexLibrary':
+        if (serverType === 'jellyfin' || serverType === 'emby') {
+          return fetchMediaServerLibrary(context.libraryKey, page);
+        }
         return fetchPlexLibrary(context.libraryKey, page);
       case 'plexWatchlist':
-        return fetchPlexWatchlist(page);
+        // Watchlist only works for Plex
+        if (serverType === 'plex') {
+          return fetchPlexWatchlist(page);
+        }
+        return { items: [], hasMore: false };
       case 'tmdb':
         return fetchTmdbBrowse(context, page);
       case 'trakt':
@@ -48,6 +100,50 @@ export async function fetchBrowseItems(
     }
   } catch (e) {
     console.log('[BrowseData] fetchBrowseItems error:', e);
+    return { items: [], hasMore: false };
+  }
+}
+
+/**
+ * Fetch from a Jellyfin/Emby library
+ */
+async function fetchMediaServerLibrary(libraryId: string, page: number): Promise<BrowseResult> {
+  try {
+    const core = getFlixorCore();
+    const serverType = core.activeServerType;
+    const offset = (page - 1) * PAGE_SIZE;
+    
+    let result: { items: any[]; totalCount: number };
+    
+    if (serverType === 'jellyfin' && core.isJellyfinServerConnected) {
+      result = await core.jellyfinServerService.getLibraryItems(libraryId, {
+        startIndex: offset,
+        limit: PAGE_SIZE,
+      });
+    } else if (serverType === 'emby' && core.isEmbyServerConnected) {
+      result = await core.embyServerService.getLibraryItems(libraryId, {
+        startIndex: offset,
+        limit: PAGE_SIZE,
+      });
+    } else {
+      return { items: [], hasMore: false };
+    }
+    
+    const prefix = getItemIdPrefix();
+    const browseItems: BrowseItem[] = result.items.map((item: any) => ({
+      id: `${prefix}${item.id}`,
+      title: item.name || item.title || 'Untitled',
+      image: getServerImageUrl(item, 300),
+      year: item.year,
+    }));
+    
+    return {
+      items: browseItems,
+      hasMore: offset + result.items.length < result.totalCount,
+      totalCount: result.totalCount,
+    };
+  } catch (e) {
+    console.log('[BrowseData] fetchMediaServerLibrary error:', e);
     return { items: [], hasMore: false };
   }
 }
@@ -71,7 +167,7 @@ async function fetchPlexDirectory(path: string, page: number): Promise<BrowseRes
     const browseItems: BrowseItem[] = items.map((item) => ({
       id: `plex:${item.ratingKey}`,
       title: item.title || item.grandparentTitle || 'Untitled',
-      image: item.thumb ? core.plexServer.getImageUrl(item.thumb, 300) : undefined,
+      image: getServerImageUrl(item, 300),
       year: item.year,
     }));
 
@@ -105,7 +201,7 @@ async function fetchPlexLibrary(libraryKey: string, page: number): Promise<Brows
     const browseItems: BrowseItem[] = items.map((item: PlexMediaItem) => ({
       id: `plex:${item.ratingKey}`,
       title: item.title || 'Untitled',
-      image: item.thumb ? core.plexServer.getImageUrl(item.thumb, 300) : undefined,
+      image: getServerImageUrl(item, 300),
       year: item.year,
     }));
 
@@ -135,7 +231,7 @@ async function fetchPlexWatchlist(page: number): Promise<BrowseResult> {
     const browseItems: BrowseItem[] = pageItems.map((item: PlexMediaItem) => ({
       id: `plex:${item.ratingKey}`,
       title: item.title || 'Untitled',
-      image: item.thumb ? core.plexServer.getImageUrl(item.thumb, 300) : undefined,
+      image: getServerImageUrl(item, 300),
       year: item.year,
     }));
 

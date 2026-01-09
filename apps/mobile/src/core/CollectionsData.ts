@@ -1,6 +1,7 @@
 /**
  * Collections data fetchers using FlixorCore
- * Fetches Plex collections for library browsing
+ * Fetches collections for library browsing
+ * Supports Plex, Jellyfin, and Emby servers
  */
 
 import { getFlixorCore } from './index';
@@ -24,7 +25,7 @@ export type CollectionMediaItem = {
 };
 
 // ============================================
-// Fetch Collections
+// Fetch Collections (Unified for all server types)
 // ============================================
 
 export async function fetchCollections(
@@ -32,16 +33,43 @@ export async function fetchCollections(
 ): Promise<CollectionItem[]> {
   try {
     const core = getFlixorCore();
-    const collections = await core.plexServer.getAllCollections(libraryType);
+    const serverType = core.activeServerType;
+    
+    if (serverType === 'jellyfin' && core.isJellyfinServerConnected) {
+      // Jellyfin collections
+      const result = await core.jellyfinServerService.getCollections();
+      return result.items.map((c: any) => ({
+        ratingKey: String(c.id),
+        title: c.name || 'Untitled',
+        thumb: c.posterPath,
+        art: c.backdropPath,
+        childCount: c.childCount,
+        type: 'collection',
+      }));
+    } else if (serverType === 'emby' && core.isEmbyServerConnected) {
+      // Emby collections
+      const result = await core.embyServerService.getCollections();
+      return result.items.map((c: any) => ({
+        ratingKey: String(c.id),
+        title: c.name || 'Untitled',
+        thumb: c.posterPath,
+        art: c.backdropPath,
+        childCount: c.childCount,
+        type: 'collection',
+      }));
+    } else {
+      // Plex collections
+      const collections = await core.plexServer.getAllCollections(libraryType);
 
-    return collections.map((c: PlexMediaItem) => ({
-      ratingKey: String(c.ratingKey),
-      title: c.title || 'Untitled',
-      thumb: c.thumb,
-      art: c.art,
-      childCount: (c as any).childCount,
-      type: c.type || 'collection',
-    }));
+      return collections.map((c: PlexMediaItem) => ({
+        ratingKey: String(c.ratingKey),
+        title: c.title || 'Untitled',
+        thumb: c.thumb,
+        art: c.art,
+        childCount: (c as any).childCount,
+        type: c.type || 'collection',
+      }));
+    }
   } catch (e) {
     console.log('[CollectionsData] fetchCollections error:', e);
     return [];
@@ -49,7 +77,7 @@ export async function fetchCollections(
 }
 
 // ============================================
-// Fetch Collection Items
+// Fetch Collection Items (Unified)
 // ============================================
 
 export async function fetchCollectionItems(
@@ -61,25 +89,57 @@ export async function fetchCollectionItems(
 ): Promise<{ items: CollectionMediaItem[]; hasMore: boolean }> {
   try {
     const core = getFlixorCore();
+    const serverType = core.activeServerType;
     const { offset = 0, limit = 40 } = options || {};
 
-    const items = await core.plexServer.getCollectionItems(collectionRatingKey, {
-      start: offset,
-      size: limit,
-    });
+    if (serverType === 'jellyfin' && core.isJellyfinServerConnected) {
+      const result = await core.jellyfinServerService.getChildren(collectionRatingKey);
+      const items = result.items.slice(offset, offset + limit);
+      const mapped: CollectionMediaItem[] = items.map((m: any) => ({
+        ratingKey: String(m.id),
+        title: m.name || m.title || 'Untitled',
+        type: m.type === 'series' ? 'show' : 'movie',
+        thumb: m.posterPath,
+        year: m.year,
+      }));
+      return {
+        items: mapped,
+        hasMore: offset + items.length < result.items.length,
+      };
+    } else if (serverType === 'emby' && core.isEmbyServerConnected) {
+      const result = await core.embyServerService.getChildren(collectionRatingKey);
+      const items = result.items.slice(offset, offset + limit);
+      const mapped: CollectionMediaItem[] = items.map((m: any) => ({
+        ratingKey: String(m.id),
+        title: m.name || m.title || 'Untitled',
+        type: m.type === 'series' ? 'show' : 'movie',
+        thumb: m.posterPath,
+        year: m.year,
+      }));
+      return {
+        items: mapped,
+        hasMore: offset + items.length < result.items.length,
+      };
+    } else {
+      // Plex
+      const items = await core.plexServer.getCollectionItems(collectionRatingKey, {
+        start: offset,
+        size: limit,
+      });
 
-    const mapped: CollectionMediaItem[] = items.map((m: PlexMediaItem) => ({
-      ratingKey: String(m.ratingKey),
-      title: m.title || 'Untitled',
-      type: m.type as 'movie' | 'show',
-      thumb: m.thumb,
-      year: m.year,
-    }));
+      const mapped: CollectionMediaItem[] = items.map((m: PlexMediaItem) => ({
+        ratingKey: String(m.ratingKey),
+        title: m.title || 'Untitled',
+        type: m.type as 'movie' | 'show',
+        thumb: m.thumb,
+        year: m.year,
+      }));
 
-    return {
-      items: mapped,
-      hasMore: mapped.length === limit,
-    };
+      return {
+        items: mapped,
+        hasMore: mapped.length === limit,
+      };
+    }
   } catch (e) {
     console.log('[CollectionsData] fetchCollectionItems error:', e);
     return { items: [], hasMore: false };
@@ -87,17 +147,27 @@ export async function fetchCollectionItems(
 }
 
 // ============================================
-// Image URLs
+// Image URLs (Unified)
 // ============================================
 
 export function getCollectionImageUrl(
   thumb: string | undefined,
-  width: number = 300
+  width: number = 300,
+  itemId?: string
 ): string {
-  if (!thumb) return '';
+  if (!thumb && !itemId) return '';
   try {
     const core = getFlixorCore();
-    return core.plexServer.getImageUrl(thumb, width);
+    const serverType = core.activeServerType;
+    
+    if (serverType === 'jellyfin' && core.isJellyfinServerConnected && itemId) {
+      return core.jellyfinServerService.getImageUrl(itemId, 'poster', { width });
+    } else if (serverType === 'emby' && core.isEmbyServerConnected && itemId) {
+      return core.embyServerService.getImageUrl(itemId, 'poster', { width });
+    } else if (thumb) {
+      return core.plexServer.getImageUrl(thumb, width);
+    }
+    return '';
   } catch {
     return '';
   }

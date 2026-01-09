@@ -254,8 +254,15 @@ export default function Details() {
               setKind('tv');
               setShowKey(rk);
               try {
+                console.log('[Details] Fetching seasons for show ratingKey:', rk);
                 const ch: any = await plexBackendDir(`/library/metadata/${rk}/children`);
-                const ss = (ch?.MediaContainer?.Metadata||[]).map((x:any)=>({ key:String(x.ratingKey), title:x.title }));
+                console.log('[Details] Seasons response:', ch);
+                console.log('[Details] Seasons Metadata:', ch?.MediaContainer?.Metadata);
+                const ss = (ch?.MediaContainer?.Metadata||[]).map((x:any)=> {
+                  console.log('[Details] Season item:', x);
+                  return { key: String(x.ratingKey), title: x.title };
+                });
+                console.log('[Details] Mapped seasons:', ss);
                 setSeasons(ss);
                 if (ss[0]) setSeasonKey(ss[0].key);
                 setActiveTab('EPISODES');
@@ -521,7 +528,12 @@ export default function Details() {
         setEpisodesLoading(true);
         // Prefer Plex episodes if plex seasonKey is numeric (ratingKey), otherwise use TMDB fallback
         if (/^\d+$/.test(seasonKey)) {
+          console.log('[Details] Loading episodes for seasonKey:', seasonKey);
           const ch: any = await plexBackendDir(`/library/metadata/${seasonKey}/children?nocache=${Date.now()}`);
+          console.log('[Details] Episode response:', ch);
+          console.log('[Details] MediaContainer:', ch?.MediaContainer);
+          console.log('[Details] Metadata:', ch?.MediaContainer?.Metadata);
+          console.log('[Details] Directory:', ch?.MediaContainer?.Directory);
           const eps = (ch?.MediaContainer?.Metadata||[]).map((e:any)=>({
             id: `plex:${e.ratingKey}`,
             title: e.title,
@@ -536,6 +548,7 @@ export default function Details() {
               return 0;
             })(),
           }));
+          console.log('[Details] Mapped episodes:', eps);
           setEpisodes(eps);
         } else if (tmdbCtx?.media==='tv' && tmdbCtx?.id) {
           const tvSeason = Number(seasonKey);

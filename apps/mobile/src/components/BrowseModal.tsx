@@ -111,7 +111,7 @@ export default function BrowseModal({
           <View style={styles.libraryInfo}>
             <Text style={styles.libraryTitle}>All Collections</Text>
             <Text style={styles.libraryType}>
-              Browse all your Plex collections
+              Browse all your collections
             </Text>
           </View>
           <Ionicons name="chevron-forward" size={20} color="#666" />

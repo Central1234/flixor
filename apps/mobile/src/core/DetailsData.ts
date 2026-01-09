@@ -14,30 +14,99 @@ export type RowItem = {
 };
 
 // ============================================
-// Plex Metadata
+// Media Metadata (Unified for all server types)
 // ============================================
 
+/**
+ * Fetch metadata for an item - works for Plex, Jellyfin, and Emby
+ */
 export async function fetchPlexMetadata(ratingKey: string): Promise<PlexMediaItem | null> {
   try {
     const core = getFlixorCore();
-    return await core.plexServer.getMetadata(ratingKey);
+    const serverType = core.activeServerType;
+    
+    if (serverType === 'jellyfin' && core.isJellyfinServerConnected) {
+      const item = await core.jellyfinServerService.getItem(ratingKey, true);
+      if (!item) return null;
+      // Convert MediaItem to PlexMediaItem-compatible format
+      return convertMediaItemToPlexFormat(item, 'jellyfin');
+    } else if (serverType === 'emby' && core.isEmbyServerConnected) {
+      const item = await core.embyServerService.getItem(ratingKey, true);
+      if (!item) return null;
+      return convertMediaItemToPlexFormat(item, 'emby');
+    } else {
+      // Plex
+      return await core.plexServer.getMetadata(ratingKey);
+    }
   } catch (e) {
     console.log('[DetailsData] fetchPlexMetadata error:', e);
     return null;
   }
 }
 
+/**
+ * Convert MediaItem (Jellyfin/Emby) to PlexMediaItem format for UI compatibility
+ */
+function convertMediaItemToPlexFormat(item: any, source: 'jellyfin' | 'emby'): PlexMediaItem {
+  return {
+    ratingKey: item.id,
+    key: item.id,
+    type: item.type === 'episode' ? 'episode' : item.type === 'series' ? 'show' : item.type,
+    title: item.name || item.title,
+    grandparentTitle: item.seriesName,
+    grandparentThumb: item.seriesThumb,
+    parentTitle: item.seasonName,
+    parentIndex: item.seasonNumber,
+    index: item.episodeNumber,
+    year: item.year,
+    thumb: item.posterPath,
+    art: item.backdropPath,
+    summary: item.overview,
+    duration: item.runTimeMs,
+    viewOffset: item.playbackPositionMs,
+    viewCount: item.played ? 1 : 0,
+    addedAt: item.dateAdded ? Math.floor(new Date(item.dateAdded).getTime() / 1000) : undefined,
+    contentRating: item.officialRating,
+    rating: item.communityRating,
+    audienceRating: item.communityRating,
+    Genre: item.genres?.map((g: string) => ({ tag: g })) || [],
+    Director: item.directors?.map((d: string) => ({ tag: d })) || [],
+    Role: item.actors?.map((a: any) => ({
+      tag: typeof a === 'string' ? a : a.name,
+      thumb: typeof a === 'object' ? a.thumb : undefined,
+    })) || [],
+    Guid: [
+      ...(item.tmdbId ? [{ id: `tmdb://${item.tmdbId}` }] : []),
+      ...(item.imdbId ? [{ id: `imdb://${item.imdbId}` }] : []),
+      ...(item.tvdbId ? [{ id: `tvdb://${item.tvdbId}` }] : []),
+    ],
+    // Store source info for routing and image URLs
+    _source: source,
+    _originalItem: item,
+  } as any;
+}
+
 export async function fetchPlexSeasons(showRatingKey: string): Promise<PlexMediaItem[]> {
   try {
     const core = getFlixorCore();
-    const children = await core.plexServer.getChildren(showRatingKey);
-    // Filter to seasons only
-    let seasons = children.filter((c: PlexMediaItem) => c.type === 'season');
-    if (!seasons.length) {
-      // Fallback: treat all children as seasons
-      seasons = children;
+    const serverType = core.activeServerType;
+    
+    if (serverType === 'jellyfin' && core.isJellyfinServerConnected) {
+      const result = await core.jellyfinServerService.getChildren(showRatingKey);
+      const seasons = result.items.filter((c: any) => c.type === 'season');
+      return seasons.map((s: any) => convertMediaItemToPlexFormat(s, 'jellyfin'));
+    } else if (serverType === 'emby' && core.isEmbyServerConnected) {
+      const result = await core.embyServerService.getChildren(showRatingKey);
+      const seasons = result.items.filter((c: any) => c.type === 'season');
+      return seasons.map((s: any) => convertMediaItemToPlexFormat(s, 'emby'));
+    } else {
+      const children = await core.plexServer.getChildren(showRatingKey);
+      let seasons = children.filter((c: PlexMediaItem) => c.type === 'season');
+      if (!seasons.length) {
+        seasons = children;
+      }
+      return seasons;
     }
-    return seasons;
   } catch (e) {
     console.log('[DetailsData] fetchPlexSeasons error:', e);
     return [];
@@ -47,7 +116,17 @@ export async function fetchPlexSeasons(showRatingKey: string): Promise<PlexMedia
 export async function fetchPlexSeasonEpisodes(seasonRatingKey: string): Promise<PlexMediaItem[]> {
   try {
     const core = getFlixorCore();
-    return await core.plexServer.getChildren(seasonRatingKey);
+    const serverType = core.activeServerType;
+    
+    if (serverType === 'jellyfin' && core.isJellyfinServerConnected) {
+      const result = await core.jellyfinServerService.getChildren(seasonRatingKey);
+      return result.items.map((e: any) => convertMediaItemToPlexFormat(e, 'jellyfin'));
+    } else if (serverType === 'emby' && core.isEmbyServerConnected) {
+      const result = await core.embyServerService.getChildren(seasonRatingKey);
+      return result.items.map((e: any) => convertMediaItemToPlexFormat(e, 'emby'));
+    } else {
+      return await core.plexServer.getChildren(seasonRatingKey);
+    }
   } catch (e) {
     console.log('[DetailsData] fetchPlexSeasonEpisodes error:', e);
     return [];
@@ -205,6 +284,7 @@ export async function mapTmdbToPlex(
 ): Promise<PlexMediaItem | null> {
   try {
     const core = getFlixorCore();
+    const serverType = core.activeServerType;
     const typeNum = mediaType === 'movie' ? 1 : 2;
     const hits: PlexMediaItem[] = [];
 
@@ -237,21 +317,35 @@ export async function mapTmdbToPlex(
       console.log('[DetailsData] Failed to get TMDB details:', e);
     }
 
-    // 2) Search Plex by title (most reliable method)
+    // 2) Search media server by title
     if (title) {
       try {
-        console.log(`[DetailsData] Searching Plex for: "${title}"`);
-        const searchResults = await core.plexServer.search(title, typeNum);
-        console.log(`[DetailsData] Search returned ${searchResults.length} results`);
-        if (searchResults.length > 0) {
-          hits.push(...searchResults);
+        console.log(`[DetailsData] Searching ${serverType} for: "${title}"`);
+        
+        if (serverType === 'jellyfin' && core.isJellyfinServerConnected) {
+          const result = await core.jellyfinServerService.search(title, mediaType === 'movie' ? 'movie' : 'series');
+          for (const item of result.items) {
+            hits.push(convertMediaItemToPlexFormat(item, 'jellyfin'));
+          }
+        } else if (serverType === 'emby' && core.isEmbyServerConnected) {
+          const result = await core.embyServerService.search(title, mediaType === 'movie' ? 'movie' : 'series');
+          for (const item of result.items) {
+            hits.push(convertMediaItemToPlexFormat(item, 'emby'));
+          }
+        } else {
+          // Plex
+          const searchResults = await core.plexServer.search(title, typeNum);
+          console.log(`[DetailsData] Search returned ${searchResults.length} results`);
+          if (searchResults.length > 0) {
+            hits.push(...searchResults);
+          }
         }
       } catch (e) {
         console.log('[DetailsData] Typed search failed:', e);
       }
 
-      // Try untyped search if no results
-      if (hits.length === 0) {
+      // Try untyped search if no results (Plex only)
+      if (hits.length === 0 && serverType === 'plex') {
         try {
           const searchResults = await core.plexServer.search(title);
           console.log(`[DetailsData] Untyped search returned ${searchResults.length} results`);
@@ -265,7 +359,7 @@ export async function mapTmdbToPlex(
     }
 
     if (hits.length === 0) {
-      console.log('[DetailsData] No Plex matches found for:', { tmdbId, title, year });
+      console.log(`[DetailsData] No ${serverType} matches found for:`, { tmdbId, title, year });
       return null;
     }
 
@@ -273,7 +367,7 @@ export async function mapTmdbToPlex(
     const unique = Array.from(
       new Map(hits.map((h) => [String(h.ratingKey), h])).values()
     );
-    console.log(`[DetailsData] Found ${unique.length} unique Plex items`);
+    console.log(`[DetailsData] Found ${unique.length} unique items`);
 
     // 3) Selection policy - match by GUID from search results
     // a) Exact TMDB GUID match
@@ -440,14 +534,23 @@ export function getYouTubeThumbnailUrl(videoKey: string): string {
 }
 
 // ============================================
-// Image URLs
+// Image URLs (Unified for all server types)
 // ============================================
 
-export function getPlexImageUrl(path: string | undefined, width: number = 300): string {
-  if (!path) return '';
+export function getPlexImageUrl(path: string | undefined, width: number = 300, itemId?: string): string {
+  if (!path && !itemId) return '';
   try {
     const core = getFlixorCore();
-    return core.plexServer.getImageUrl(path, width);
+    const serverType = core.activeServerType;
+    
+    if (serverType === 'jellyfin' && core.isJellyfinServerConnected && itemId) {
+      return core.jellyfinServerService.getImageUrl(itemId, 'poster', { width });
+    } else if (serverType === 'emby' && core.isEmbyServerConnected && itemId) {
+      return core.embyServerService.getImageUrl(itemId, 'poster', { width });
+    } else if (path) {
+      return core.plexServer.getImageUrl(path, width);
+    }
+    return '';
   } catch {
     return '';
   }
@@ -633,6 +736,7 @@ export interface NextUpEpisode {
  * 1. Episode currently in progress (has viewOffset but not completed)
  * 2. First unwatched episode
  * 3. If all watched, returns first episode for "Rewatch"
+ * Supports Plex, Jellyfin, and Emby servers
  */
 export async function getNextUpEpisode(
   showRatingKey: string,
@@ -640,30 +744,61 @@ export async function getNextUpEpisode(
 ): Promise<NextUpEpisode | null> {
   try {
     const core = getFlixorCore();
+    const serverType = core.activeServerType;
 
-    // First, check Plex on-deck for this show
+    // First, check on-deck/continue watching for this show
     try {
-      const onDeck = await core.plexServer.getOnDeck();
-      const showOnDeck = onDeck.find(
-        (item: any) =>
-          item.type === 'episode' &&
+      let onDeck: any[] = [];
+      
+      if (serverType === 'jellyfin' && core.isJellyfinServerConnected) {
+        const result = await core.jellyfinServerService.getContinueWatching();
+        onDeck = result.items;
+      } else if (serverType === 'emby' && core.isEmbyServerConnected) {
+        const result = await core.embyServerService.getContinueWatching();
+        onDeck = result.items;
+      } else {
+        onDeck = await core.plexServer.getOnDeck();
+      }
+      
+      const showOnDeck = onDeck.find((item: any) => {
+        if (serverType === 'jellyfin' || serverType === 'emby') {
+          return item.type === 'episode' && 
+            (item.seriesId === showRatingKey || String(item.seriesId) === String(showRatingKey));
+        }
+        return item.type === 'episode' &&
           (item.grandparentRatingKey === showRatingKey ||
-            String(item.grandparentRatingKey) === String(showRatingKey))
-      );
+            String(item.grandparentRatingKey) === String(showRatingKey));
+      });
 
       if (showOnDeck) {
-        const progress = showOnDeck.viewOffset && showOnDeck.duration
-          ? Math.round((showOnDeck.viewOffset / showOnDeck.duration) * 100)
-          : 0;
-        return {
-          ratingKey: String(showOnDeck.ratingKey),
-          title: showOnDeck.title || 'Episode',
-          seasonNumber: showOnDeck.parentIndex || 1,
-          episodeNumber: showOnDeck.index || 1,
-          thumb: showOnDeck.thumb,
-          progress,
-          status: 'in-progress',
-        };
+        let progress = 0;
+        if (serverType === 'jellyfin' || serverType === 'emby') {
+          progress = showOnDeck.playbackPositionMs && showOnDeck.runTimeMs
+            ? Math.round((showOnDeck.playbackPositionMs / showOnDeck.runTimeMs) * 100)
+            : 0;
+          return {
+            ratingKey: String(showOnDeck.id),
+            title: showOnDeck.name || 'Episode',
+            seasonNumber: showOnDeck.seasonNumber || 1,
+            episodeNumber: showOnDeck.episodeNumber || 1,
+            thumb: showOnDeck.posterPath,
+            progress,
+            status: 'in-progress',
+          };
+        } else {
+          progress = showOnDeck.viewOffset && showOnDeck.duration
+            ? Math.round((showOnDeck.viewOffset / showOnDeck.duration) * 100)
+            : 0;
+          return {
+            ratingKey: String(showOnDeck.ratingKey),
+            title: showOnDeck.title || 'Episode',
+            seasonNumber: showOnDeck.parentIndex || 1,
+            episodeNumber: showOnDeck.index || 1,
+            thumb: showOnDeck.thumb,
+            progress,
+            status: 'in-progress',
+          };
+        }
       }
     } catch (e) {
       console.log('[DetailsData] getOnDeck failed, falling back to episode scan:', e);
@@ -675,30 +810,56 @@ export async function getNextUpEpisode(
     let inProgress: NextUpEpisode | null = null;
 
     for (const season of allSeasons) {
-      const seasonRk = season.ratingKey || season.key;
+      const seasonRk = season.ratingKey || season.key || season.id;
       if (!seasonRk) continue;
 
       // Skip specials (season 0)
-      const seasonNum = season.index || season.parentIndex || parseInt(season.key) || 0;
+      const seasonNum = season.index || season.parentIndex || season.seasonNumber || parseInt(season.key) || 0;
       if (seasonNum === 0) continue;
 
       try {
-        const episodes = await core.plexServer.getChildren(String(seasonRk));
+        let episodes: any[] = [];
+        
+        if (serverType === 'jellyfin' && core.isJellyfinServerConnected) {
+          const result = await core.jellyfinServerService.getChildren(String(seasonRk));
+          episodes = result.items;
+        } else if (serverType === 'emby' && core.isEmbyServerConnected) {
+          const result = await core.embyServerService.getChildren(String(seasonRk));
+          episodes = result.items;
+        } else {
+          episodes = await core.plexServer.getChildren(String(seasonRk));
+        }
 
         for (const ep of episodes) {
-          const epNum = ep.index || 1;
-          const viewOffset = ep.viewOffset || 0;
-          const duration = ep.duration || 1;
-          const viewCount = ep.viewCount || 0;
+          let epNum: number, viewOffset: number, duration: number, viewCount: number, ratingKey: string, title: string, thumb: string | undefined;
+          
+          if (serverType === 'jellyfin' || serverType === 'emby') {
+            epNum = ep.episodeNumber || ep.index || 1;
+            viewOffset = ep.playbackPositionMs || 0;
+            duration = ep.runTimeMs || 1;
+            viewCount = ep.played ? 1 : 0;
+            ratingKey = String(ep.id);
+            title = ep.name || `Episode ${epNum}`;
+            thumb = ep.posterPath;
+          } else {
+            epNum = ep.index || 1;
+            viewOffset = ep.viewOffset || 0;
+            duration = ep.duration || 1;
+            viewCount = ep.viewCount || 0;
+            ratingKey = String(ep.ratingKey);
+            title = ep.title || `Episode ${epNum}`;
+            thumb = ep.thumb;
+          }
+          
           const progress = Math.round((viewOffset / duration) * 100);
           const isCompleted = viewCount > 0 || progress >= 95;
 
           const epInfo: NextUpEpisode = {
-            ratingKey: String(ep.ratingKey),
-            title: ep.title || `Episode ${epNum}`,
+            ratingKey,
+            title,
             seasonNumber: seasonNum,
             episodeNumber: epNum,
-            thumb: ep.thumb,
+            thumb,
             progress,
             status: 'next-unwatched',
           };

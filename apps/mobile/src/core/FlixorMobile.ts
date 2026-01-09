@@ -277,17 +277,50 @@ export class FlixorMobile {
   // Home Screen Data
   // ============================================
 
+  /**
+   * Get home data - unified across all server types
+   */
   async getHomeData(): Promise<MobileHomeData> {
-    const [continueWatching, recentlyAdded, onDeck, trendingMovies, trendingShows] =
-      await Promise.all([
+    const serverType = this.serverType;
+    
+    let continueWatching: PlexMediaItem[] = [];
+    let recentlyAdded: PlexMediaItem[] = [];
+    let onDeck: PlexMediaItem[] = [];
+    
+    if (serverType === 'jellyfin' && this.core.isJellyfinServerConnected) {
+      const service = this.core.jellyfinServerService;
+      const [cw, recent, next] = await Promise.all([
+        service.getContinueWatching().catch(() => []),
+        service.getRecentlyAdded().catch(() => []),
+        service.getNextUp().catch(() => []),
+      ]);
+      // Convert MediaItem to PlexMediaItem-compatible format
+      continueWatching = cw.map(this.convertToPlexMediaItem);
+      recentlyAdded = recent.map(this.convertToPlexMediaItem);
+      onDeck = next.map(this.convertToPlexMediaItem);
+    } else if (serverType === 'emby' && this.core.isEmbyServerConnected) {
+      const service = this.core.embyServerService;
+      const [cw, recent, next] = await Promise.all([
+        service.getContinueWatching().catch(() => []),
+        service.getRecentlyAdded().catch(() => []),
+        service.getNextUp().catch(() => []),
+      ]);
+      continueWatching = cw.map(this.convertToPlexMediaItem);
+      recentlyAdded = recent.map(this.convertToPlexMediaItem);
+      onDeck = next.map(this.convertToPlexMediaItem);
+    } else if (serverType === 'plex' && this.core.isPlexServerConnected) {
+      [continueWatching, recentlyAdded, onDeck] = await Promise.all([
         this.core.plexServer.getContinueWatching().catch(() => []),
         this.core.plexServer.getRecentlyAdded().catch(() => []),
         this.core.plexServer.getOnDeck().catch(() => []),
-        this.core.tmdb.getTrendingMovies('week', 1).catch(() => ({ results: [] })),
-        this.core.tmdb.getTrendingTV('week', 1).catch(() => ({ results: [] })),
       ]);
+    }
 
-    // Merge trending movies and shows
+    const [trendingMovies, trendingShows] = await Promise.all([
+      this.core.tmdb.getTrendingMovies('week', 1).catch(() => ({ results: [] })),
+      this.core.tmdb.getTrendingTV('week', 1).catch(() => ({ results: [] })),
+    ]);
+
     const trending = [
       ...trendingMovies.results.slice(0, 10),
       ...trendingShows.results.slice(0, 10),
@@ -301,11 +334,120 @@ export class FlixorMobile {
     };
   }
 
+  /**
+   * Convert MediaItem (Jellyfin/Emby) to PlexMediaItem format for UI compatibility
+   */
+  private convertToPlexMediaItem(item: any): PlexMediaItem {
+    const serverType = this.serverType;
+    return {
+      ratingKey: item.id,
+      key: item.id,
+      type: item.type === 'episode' ? 'episode' : item.type === 'series' ? 'show' : item.type,
+      title: item.name || item.title,
+      grandparentTitle: item.seriesName,
+      grandparentThumb: item.seriesThumb,
+      parentIndex: item.seasonNumber,
+      index: item.episodeNumber,
+      year: item.year,
+      thumb: item.posterPath,
+      art: item.backdropPath,
+      summary: item.overview,
+      duration: item.runTimeMs,
+      viewOffset: item.playbackPositionMs,
+      viewCount: item.played ? 1 : 0,
+      addedAt: item.dateAdded ? Math.floor(new Date(item.dateAdded).getTime() / 1000) : undefined,
+      contentRating: item.officialRating,
+      rating: item.communityRating,
+      // Mark source for routing
+      _source: serverType,
+      _originalItem: item,
+    } as any;
+  }
+
+  // ============================================
+  // Unified Library Methods
+  // ============================================
+
+  /**
+   * Get continue watching - works for all server types
+   */
+  async getContinueWatching(): Promise<PlexMediaItem[]> {
+    const serverType = this.serverType;
+    
+    if (serverType === 'jellyfin' && this.core.isJellyfinServerConnected) {
+      const items = await this.core.jellyfinServerService.getContinueWatching();
+      return items.map(item => this.convertToPlexMediaItem(item));
+    } else if (serverType === 'emby' && this.core.isEmbyServerConnected) {
+      const items = await this.core.embyServerService.getContinueWatching();
+      return items.map(item => this.convertToPlexMediaItem(item));
+    } else if (serverType === 'plex' && this.core.isPlexServerConnected) {
+      return this.core.plexServer.getContinueWatching();
+    }
+    return [];
+  }
+
+  /**
+   * Get recently added - works for all server types
+   */
+  async getRecentlyAdded(): Promise<PlexMediaItem[]> {
+    const serverType = this.serverType;
+    
+    if (serverType === 'jellyfin' && this.core.isJellyfinServerConnected) {
+      const items = await this.core.jellyfinServerService.getRecentlyAdded();
+      return items.map(item => this.convertToPlexMediaItem(item));
+    } else if (serverType === 'emby' && this.core.isEmbyServerConnected) {
+      const items = await this.core.embyServerService.getRecentlyAdded();
+      return items.map(item => this.convertToPlexMediaItem(item));
+    } else if (serverType === 'plex' && this.core.isPlexServerConnected) {
+      return this.core.plexServer.getRecentlyAdded();
+    }
+    return [];
+  }
+
+  /**
+   * Get image URL - unified for all server types
+   */
+  getImageUrl(item: PlexMediaItem, width: number = 300): string {
+    const serverType = this.serverType;
+    const source = (item as any)._source || serverType;
+    
+    if (source === 'jellyfin' && this.core.isJellyfinServerConnected) {
+      const originalItem = (item as any)._originalItem;
+      if (originalItem) {
+        return this.core.jellyfinServerService.getImageUrl(originalItem.id, 'poster', { width });
+      }
+      // Fallback: use ratingKey as the ID
+      return this.core.jellyfinServerService.getImageUrl(item.ratingKey, 'poster', { width });
+    } else if (source === 'emby' && this.core.isEmbyServerConnected) {
+      const originalItem = (item as any)._originalItem;
+      if (originalItem) {
+        return this.core.embyServerService.getImageUrl(originalItem.id, 'poster', { width });
+      }
+      return this.core.embyServerService.getImageUrl(item.ratingKey, 'poster', { width });
+    } else {
+      // Plex or fallback
+      const path = item.thumb || item.art;
+      if (!path) return '';
+      try {
+        return this.core.plexServer.getImageUrl(path, width);
+      } catch {
+        return '';
+      }
+    }
+  }
+
   // ============================================
   // Library
   // ============================================
 
   async getLibraries() {
+    const serverType = this.serverType;
+    
+    if (serverType === 'jellyfin' && this.core.isJellyfinServerConnected) {
+      return this.core.jellyfinServerService.getLibraries();
+    } else if (serverType === 'emby' && this.core.isEmbyServerConnected) {
+      return this.core.embyServerService.getLibraries();
+    }
     return this.core.plexServer.getLibraries();
   }
 

@@ -68,61 +68,78 @@ export default function Player() {
       let url: string | undefined;
       if (decoded.startsWith('plex:')) {
         const s = loadSettings();
-        if (s.plexBaseUrl && s.plexToken) {
-          const rk = decoded.replace(/^plex:/, '');
-          try {
-            const meta: any = await (await import('@/services/plex_backend')).plexBackendMetadata(rk);
-            const m = meta?.MediaContainer?.Metadata?.[0];
-            if (m) {
-              setTitle(m.title || m.grandparentTitle || '');
-              const p = m.thumb || m.parentThumb || m.grandparentThumb;
-              const img = apiClient.getPlexImageNoToken(p || '');
-              setPoster(img);
-              setRatingKey(String(m.ratingKey));
-              // Fetch markers (intro, credits)
-              try {
-                const mark: any = await (await import('@/services/plex_backend')).plexBackendMetadataWithExtras(String(m.ratingKey));
-                const mm = mark?.MediaContainer?.Metadata?.[0];
-                const list = (mm?.Marker || []).map((mk: any) => ({ type: String(mk.type||''), start: (mk.start||0)/1000, end: (mk.end||0)/1000 }));
-                setMarkers(list);
-              } catch {}
+        // Use backend for streaming regardless of localStorage settings
+        const rk = decoded.replace(/^plex:/, '');
+        try {
+          console.log('[Player] Fetching metadata for ratingKey:', rk);
+          const meta: any = await (await import('@/services/plex_backend')).plexBackendMetadata(rk);
+          console.log('[Player] Metadata response:', meta);
+          const m = meta?.MediaContainer?.Metadata?.[0];
+          if (m) {
+            console.log('[Player] Found media item:', m.title, 'Media parts:', m.Media?.length);
+            setTitle(m.title || m.grandparentTitle || '');
+            const p = m.thumb || m.parentThumb || m.grandparentThumb;
+            const img = apiClient.getPlexImageNoToken(p || '');
+            setPoster(img);
+            setRatingKey(String(m.ratingKey));
+            // Fetch markers (intro, credits)
+            try {
+              const mark: any = await (await import('@/services/plex_backend')).plexBackendMetadataWithExtras(String(m.ratingKey));
+              const mm = mark?.MediaContainer?.Metadata?.[0];
+              const list = (mm?.Marker || []).map((mk: any) => ({ type: String(mk.type||''), start: (mk.start||0)/1000, end: (mk.end||0)/1000 }));
+              setMarkers(list);
+            } catch {}
+          }
+          // Get stream URL - check for Media parts or just use ratingKey directly
+          const v = qs.get('v');
+          let partId: string | undefined;
+          if (m) {
+            if (v) {
+              const media = (m?.Media||[]).find((me:any)=> String(me.id||me.Id)===v);
+              partId = media?.Part?.[0]?.id ? String(media.Part[0].id) : undefined;
+            } else {
+              partId = m?.Media?.[0]?.Part?.[0]?.id ? String(m.Media[0].Part[0].id) : undefined;
             }
-            const v = qs.get('v');
-            let partId: string | undefined;
-              if (v) {
-                const media = (m?.Media||[]).find((me:any)=> String(me.id||me.Id)===v);
-                partId = media?.Part?.[0]?.id ? String(media.Part[0].id) : undefined;
-              } else {
-                partId = m?.Media?.[0]?.Part?.[0]?.id ? String(m.Media[0].Part[0].id) : undefined;
-              }
-              if (partId) {
-                const resSel = resolution !== 'source' ? resolution : undefined;
-                const resBitrate = bitrateForResolution(resSel);
-                const qnum = quality !== 'original' ? (Number(quality) || undefined) : undefined;
-                url = await backendStreamUrl(String(m.ratingKey), {
-                  quality: qnum ?? resBitrate,
-                  resolution: resSel,
-                });
-                setIsDash(false);
-              }
+          }
+          
+          // Try to get stream URL even without partId - backend can handle it
+          try {
+            console.log('[Player] Getting stream URL for ratingKey:', rk, 'partId:', partId);
+            const resSel = resolution !== 'source' ? resolution : undefined;
+            const resBitrate = bitrateForResolution(resSel);
+            const qnum = quality !== 'original' ? (Number(quality) || undefined) : undefined;
+            url = await backendStreamUrl(rk, {
+              quality: qnum ?? resBitrate,
+              resolution: resSel,
+            });
+            console.log('[Player] Got stream URL:', url);
+            setIsDash(false);
+          } catch (streamErr) {
+            console.error('[Player] Failed to get stream URL:', streamErr);
+          }
 
-            // Compute next episode prompt if current is an episode
-            if (m?.type === 'episode' && m.parentRatingKey) {
-              try {
-                const kids: any = await (await import('@/services/plex_backend')).plexBackendDir(`/library/metadata/${String(m.parentRatingKey)}/children`);
-                const list = (kids?.MediaContainer?.Metadata || []) as any[];
-                // Sort by 'index' ascending
-                list.sort((a:any,b:any)=> (a.index||0)-(b.index||0));
-                const idx = list.findIndex((e:any)=> String(e.ratingKey) === String(m.ratingKey));
-                const n = idx>=0 ? list[idx+1] : null;
-                if (n) setNext({ id: `plex:${String(n.ratingKey)}`, title: n.title || `Episode ${(n.index||'')}` }); else setNext(null);
-              } catch { setNext(null); }
-            } else { setNext(null); }
-          } catch (e) { console.error(e); }
+          // Compute next episode prompt if current is an episode
+          if (m?.type === 'episode' && m.parentRatingKey) {
+            try {
+              const kids: any = await (await import('@/services/plex_backend')).plexBackendDir(`/library/metadata/${String(m.parentRatingKey)}/children`);
+              const list = (kids?.MediaContainer?.Metadata || []) as any[];
+              // Sort by 'index' ascending
+              list.sort((a:any,b:any)=> (a.index||0)-(b.index||0));
+              const idx = list.findIndex((e:any)=> String(e.ratingKey) === String(m.ratingKey));
+              const n = idx>=0 ? list[idx+1] : null;
+              if (n) setNext({ id: `plex:${String(n.ratingKey)}`, title: n.title || `Episode ${(n.index||'')}` }); else setNext(null);
+            } catch { setNext(null); }
+          } else { setNext(null); }
+        } catch (e) { 
+          console.error('[Player] Error in open():', e); 
         }
       }
-      // Fallback: sample
-      if (!url) { url = `https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4`; setIsDash(false); }
+      // Fallback: sample video only if no stream URL was obtained
+      if (!url) { 
+        console.warn('[Player] No stream URL obtained, falling back to sample video');
+        url = `https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4`; 
+        setIsDash(false); 
+      }
       // @ts-ignore
       setWebUrl(url);
     }

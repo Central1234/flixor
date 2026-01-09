@@ -18,6 +18,7 @@ import type { BrowseContext, BrowseItem } from '@flixor/core';
 import { fetchBrowseItems } from '../core/BrowseData';
 import { TopBarStore } from '../components/TopBarStore';
 import { useAppSettings } from '../hooks/useAppSettings';
+import { useFlixor } from '../core/FlixorContext';
 
 // Preload cap for pagination
 const IMAGE_PRELOAD_CAP = 12;
@@ -36,6 +37,7 @@ export default function Browse() {
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
   const { settings } = useAppSettings();
+  const { serverType } = useFlixor();
   const isMounted = useRef(true);
 
   const { context, title, initialItems = [] } = route.params || {};
@@ -132,14 +134,25 @@ export default function Browse() {
   const handleItemPress = useCallback((item: BrowseItem) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (!item?.id) return;
+    
+    // Check for server-specific prefixes
     if (item.id.startsWith('plex:')) {
       const rk = item.id.split(':')[1];
       nav.navigate('Details', { type: 'plex', ratingKey: rk });
+    } else if (item.id.startsWith('jellyfin:')) {
+      const id = item.id.split(':')[1];
+      nav.navigate('Details', { type: 'jellyfin', ratingKey: id });
+    } else if (item.id.startsWith('emby:')) {
+      const id = item.id.split(':')[1];
+      nav.navigate('Details', { type: 'emby', ratingKey: id });
     } else if (item.id.startsWith('tmdb:')) {
       const [, media, id] = item.id.split(':');
       nav.navigate('Details', { type: 'tmdb', mediaType: media === 'movie' ? 'movie' : 'tv', id });
+    } else {
+      // Fallback: use current server type
+      nav.navigate('Details', { type: serverType || 'plex', ratingKey: item.id });
     }
-  }, [nav]);
+  }, [nav, serverType]);
 
   const handleBack = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);

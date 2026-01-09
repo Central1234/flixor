@@ -723,26 +723,86 @@ router.get('/dir/*', requireAuth, async (req: AuthenticatedRequest, res: Respons
   try {
     const path = req.params[0] || '';
     const client = await getJellyfinClient(req.user!.id);
+    logger.info('[Jellyfin /dir] Request path:', path);
 
     // Parse the path - could be /library/metadata/:id/children
     const childrenMatch = path.match(/library\/metadata\/([^/]+)\/children/);
     
     if (childrenMatch) {
       const parentId = childrenMatch[1];
-      const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
-        params: {
-          ParentId: parentId,
-          Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
-          ImageTypeLimit: 1,
-          EnableImageTypes: 'Primary,Backdrop,Thumb',
-        },
+      logger.info('[Jellyfin /dir] Fetching children for parentId:', parentId);
+      
+      // First, fetch the parent item to determine its type
+      const parentResponse = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items/${parentId}`, {
         headers: {
           'Accept': 'application/json',
           'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
         },
       });
 
+      const parentItem = parentResponse.data;
+      const parentType = parentItem?.Type;
+      logger.info('[Jellyfin /dir] Parent item type:', parentType, 'Name:', parentItem?.Name);
+
+      let response;
+
+      if (parentType === 'Series') {
+        // Use dedicated /Shows/{seriesId}/Seasons endpoint for TV series
+        logger.info('[Jellyfin /dir] Fetching seasons for series:', parentId);
+        response = await axios.get(`${client.baseUrl}/Shows/${parentId}/Seasons`, {
+          params: {
+            UserId: client.userId,
+            Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear,ItemCounts',
+            ImageTypeLimit: 1,
+            EnableImageTypes: 'Primary,Backdrop,Thumb',
+          },
+          headers: {
+            'Accept': 'application/json',
+            'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+          },
+        });
+        logger.info('[Jellyfin /dir] Seasons response items count:', response.data.Items?.length || 0);
+      } else if (parentType === 'Season') {
+        // Use dedicated /Shows/{seriesId}/Episodes endpoint for TV seasons
+        const seriesId = parentItem.SeriesId;
+        logger.info('[Jellyfin /dir] Fetching episodes for season:', parentId, 'seriesId:', seriesId);
+        response = await axios.get(`${client.baseUrl}/Shows/${seriesId}/Episodes`, {
+          params: {
+            UserId: client.userId,
+            SeasonId: parentId,
+            Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear,MediaSources',
+            ImageTypeLimit: 1,
+            EnableImageTypes: 'Primary,Backdrop,Thumb,Screenshot',
+          },
+          headers: {
+            'Accept': 'application/json',
+            'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+          },
+        });
+        logger.info('[Jellyfin /dir] Episodes response items count:', response.data.Items?.length || 0);
+      } else {
+        // Fallback to generic Items endpoint for other types (folders, etc.)
+        logger.info('[Jellyfin /dir] Using generic Items endpoint for type:', parentType);
+        response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
+          params: {
+            ParentId: parentId,
+            Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
+            ImageTypeLimit: 1,
+            EnableImageTypes: 'Primary,Backdrop,Thumb',
+          },
+          headers: {
+            'Accept': 'application/json',
+            'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+          },
+        });
+      }
+
       const items = (response.data.Items || []).map((item: any) => normalizeJellyfinItem(item, client.baseUrl));
+      logger.info('[Jellyfin /dir] Normalized items count:', items.length);
+      if (items[0]) {
+        logger.info('[Jellyfin /dir] First normalized item:', JSON.stringify(items[0], null, 2));
+      }
+      
       res.json({ Metadata: items, Directory: [] });
     } else {
       res.json({ Metadata: [], Directory: [] });

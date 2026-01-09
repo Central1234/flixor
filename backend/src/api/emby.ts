@@ -597,6 +597,7 @@ router.get('/metadata/:ratingKey', requireAuth, async (req: AuthenticatedRequest
   try {
     const { ratingKey } = req.params;
     const client = await getEmbyClient(req.user!.id);
+    logger.info('[Emby /metadata] Fetching metadata for ratingKey:', ratingKey);
 
     // Fetch both item metadata and playback info for MediaSources
     const [metaResponse, playbackResponse] = await Promise.all([
@@ -621,6 +622,10 @@ router.get('/metadata/:ratingKey', requireAuth, async (req: AuthenticatedRequest
       }).catch(() => ({ data: {} })), // Don't fail if PlaybackInfo errors (e.g., for Series)
     ]);
 
+    logger.info('[Emby /metadata] Raw Emby response type:', metaResponse.data?.Type);
+    logger.info('[Emby /metadata] Raw Emby response name:', metaResponse.data?.Name);
+    logger.info('[Emby /metadata] Raw Emby response Id:', metaResponse.data?.Id);
+
     // Merge MediaSources from PlaybackInfo into item data
     const itemData = { ...metaResponse.data };
     if (playbackResponse.data.MediaSources?.length) {
@@ -628,6 +633,7 @@ router.get('/metadata/:ratingKey', requireAuth, async (req: AuthenticatedRequest
     }
 
     const item = normalizeEmbyItem(itemData, client.baseUrl);
+    logger.info('[Emby /metadata] Normalized item ratingKey:', item.ratingKey, 'type:', item.type, 'title:', item.title);
     res.json(item);
   } catch (error: any) {
     logger.error('Failed to get Emby metadata:', error.message);
@@ -718,25 +724,90 @@ router.get('/dir/*', requireAuth, async (req: AuthenticatedRequest, res: Respons
   try {
     const path = req.params[0] || '';
     const client = await getEmbyClient(req.user!.id);
+    logger.info('[Emby /dir] Request path:', path);
 
     const childrenMatch = path.match(/library\/metadata\/([^/]+)\/children/);
     
     if (childrenMatch) {
       const parentId = childrenMatch[1];
-      const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
-        params: {
-          ParentId: parentId,
-          Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
-          ImageTypeLimit: 1,
-          EnableImageTypes: 'Primary,Backdrop,Thumb',
-        },
+      logger.info('[Emby /dir] Fetching children for parentId:', parentId);
+      
+      // First, fetch the parent item to determine its type
+      const parentResponse = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items/${parentId}`, {
         headers: {
           'Accept': 'application/json',
           'X-Emby-Authorization': getEmbyAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
         },
       });
 
+      const parentItem = parentResponse.data;
+      const parentType = parentItem?.Type;
+      logger.info('[Emby /dir] Parent item type:', parentType, 'Name:', parentItem?.Name);
+
+      let response;
+
+      if (parentType === 'Series') {
+        // Use dedicated /Shows/{seriesId}/Seasons endpoint for TV series
+        logger.info('[Emby /dir] Fetching seasons for series:', parentId);
+        response = await axios.get(`${client.baseUrl}/Shows/${parentId}/Seasons`, {
+          params: {
+            UserId: client.userId,
+            Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear,ItemCounts',
+            ImageTypeLimit: 1,
+            EnableImageTypes: 'Primary,Backdrop,Thumb',
+          },
+          headers: {
+            'Accept': 'application/json',
+            'X-Emby-Authorization': getEmbyAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+          },
+        });
+        logger.info('[Emby /dir] Seasons response items count:', response.data.Items?.length || 0);
+      } else if (parentType === 'Season') {
+        // Use dedicated /Shows/{seriesId}/Episodes endpoint for TV seasons
+        const seriesId = parentItem.SeriesId;
+        logger.info('[Emby /dir] Fetching episodes for season:', parentId, 'seriesId:', seriesId);
+        response = await axios.get(`${client.baseUrl}/Shows/${seriesId}/Episodes`, {
+          params: {
+            UserId: client.userId,
+            SeasonId: parentId,
+            Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear,MediaSources',
+            ImageTypeLimit: 1,
+            EnableImageTypes: 'Primary,Backdrop,Thumb,Screenshot',
+          },
+          headers: {
+            'Accept': 'application/json',
+            'X-Emby-Authorization': getEmbyAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+          },
+        });
+        logger.info('[Emby /dir] Episodes response items count:', response.data.Items?.length || 0);
+      } else {
+        // Fallback to generic Items endpoint for other types (folders, etc.)
+        logger.info('[Emby /dir] Using generic Items endpoint for type:', parentType);
+        response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
+          params: {
+            ParentId: parentId,
+            Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
+            ImageTypeLimit: 1,
+            EnableImageTypes: 'Primary,Backdrop,Thumb',
+          },
+          headers: {
+            'Accept': 'application/json',
+            'X-Emby-Authorization': getEmbyAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+          },
+        });
+      }
+
+      logger.info('[Emby /dir] Raw response items count:', response.data.Items?.length || 0);
+      if (response.data.Items?.[0]) {
+        logger.info('[Emby /dir] First raw item:', JSON.stringify(response.data.Items[0], null, 2));
+      }
+
       const items = (response.data.Items || []).map((item: any) => normalizeEmbyItem(item, client.baseUrl));
+      logger.info('[Emby /dir] Normalized items count:', items.length);
+      if (items[0]) {
+        logger.info('[Emby /dir] First normalized item:', JSON.stringify(items[0], null, 2));
+      }
+      
       res.json({ Metadata: items, Directory: [] });
     } else {
       res.json({ Metadata: [], Directory: [] });

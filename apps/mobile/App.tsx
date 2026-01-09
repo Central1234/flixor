@@ -67,14 +67,14 @@ if (Platform.OS === 'ios') {
 
 // New standalone imports
 import { FlixorProvider, useFlixor } from './src/core';
-import PlexLogin from './src/screens/PlexLogin';
+import Login from './src/screens/Login';
 import ServerSelect from './src/screens/ServerSelect';
 
 // Note: expo-image uses disk cache by default (cachePolicy="disk" or "memory-disk")
 // Cache limits are managed by the OS and expo-image internally
 
 type RootStackParamList = {
-  PlexLogin: undefined;
+  Login: undefined;
   ServerSelect: undefined;
   Main: undefined;
 };
@@ -277,15 +277,18 @@ const Tabs = React.memo(() => {
 });
 
 function AppContent() {
-  const { flixor, isLoading, error, isAuthenticated, isConnected, refresh } = useFlixor();
+  const { flixor, isLoading, error, isAuthenticated, isConnected, serverType, refresh } = useFlixor();
 
   // Update the logout handler ref so memoized components can access it
   logoutHandlerRef = React.useCallback(async () => {
     if (flixor) {
-      await flixor.logout();
+      await flixor.logoutAll();
       refresh();
     }
   }, [flixor, refresh]);
+
+  // For Jellyfin/Emby, isAuthenticated means isConnected too (they connect directly to server)
+  const needsServerSelect = isAuthenticated && !isConnected && serverType === 'plex';
 
   // Show loading screen during initialization
   if (isLoading) {
@@ -313,12 +316,12 @@ function AppContent() {
     <NavigationContainer>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         {!isAuthenticated ? (
-          // Not logged in - show Plex login
-          <Stack.Screen name="PlexLogin">
-            {() => <PlexLogin onAuthenticated={refresh} />}
+          // Not logged in - show unified login (Plex/Jellyfin/Emby)
+          <Stack.Screen name="Login">
+            {() => <Login onAuthenticated={refresh} />}
           </Stack.Screen>
-        ) : !isConnected ? (
-          // Logged in but no server selected - show server selection
+        ) : needsServerSelect ? (
+          // Plex logged in but no server selected - show server selection
           <Stack.Screen name="ServerSelect">
             {() => <ServerSelect onConnected={refresh} />}
           </Stack.Screen>

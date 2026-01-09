@@ -114,7 +114,13 @@ class ApiClient {
   }
 
   // New: no-token Plex image (backend derives server/token from session)
+  // For Jellyfin/Emby, images are already full URLs and don't need proxying
   getPlexImageNoToken(path: string, options?: { width?: number; height?: number; quality?: number; format?: string }) {
+    // If path is already a full URL (Jellyfin/Emby), return as-is
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      return path;
+    }
+    // Otherwise proxy through backend (Plex)
     const params = new URLSearchParams({ path });
     if (options?.width) params.append('w', String(options.width));
     if (options?.height) params.append('h', String(options.height));
@@ -132,6 +138,29 @@ class ApiClient {
   async flushCache(bucket?: string) {
     const path = bucket ? `/cache/flush?bucket=${bucket}` : '/cache/flush';
     return this.request(path, { method: 'POST' });
+  }
+
+  // Jellyfin/Emby authentication
+  async authenticateMediaServer(
+    serverType: 'jellyfin' | 'emby',
+    serverAddress: string,
+    username: string,
+    password?: string
+  ): Promise<{ success: boolean; error?: string }> {
+    return this.request(`/auth/${serverType}/login`, {
+      method: 'POST',
+      body: JSON.stringify({ serverAddress, username, password: password || '' }),
+    });
+  }
+
+  async testMediaServerConnection(
+    serverType: 'jellyfin' | 'emby',
+    serverAddress: string
+  ): Promise<{ success: boolean; serverName?: string; error?: string }> {
+    return this.request(`/auth/${serverType}/test`, {
+      method: 'POST',
+      body: JSON.stringify({ serverAddress }),
+    });
   }
 }
 

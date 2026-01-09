@@ -6,9 +6,9 @@ export class User {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
-  @Column({ type: 'integer', unique: true })
+  @Column({ type: 'varchar', length: 255, unique: true })
   @Index()
-  plexId!: number;
+  plexId!: string; // Used for external ID: plex ID, or "jellyfin:serverId:userId", or "emby:serverId:userId"
 
   @Column({ type: 'varchar', length: 255 })
   username!: string;
@@ -22,8 +22,12 @@ export class User {
   @Column({ type: 'text', nullable: true })
   title?: string;
 
-  @Column({ type: 'text', select: false })
-  plexToken!: string;
+  @Column({ type: 'text', nullable: true, select: false })
+  plexToken?: string; // Only used for Plex users
+
+  // Alias for avatar URL (used by Jellyfin/Emby)
+  @Column({ type: 'text', nullable: true })
+  avatarUrl?: string;
 
   @Column({ type: 'boolean', default: false })
   hasPassword!: boolean;

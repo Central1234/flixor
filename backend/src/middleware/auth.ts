@@ -8,6 +8,7 @@ declare module 'express-session' {
     userId?: string;
     plexId?: number;
     username?: string;
+    serverType?: 'plex' | 'jellyfin' | 'emby';
   }
 }
 

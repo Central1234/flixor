@@ -6,6 +6,9 @@ export class UserSettings {
   @PrimaryColumn({ type: 'varchar' })
   userId!: string;
 
+  @Column({ type: 'varchar', nullable: true, default: 'plex' })
+  serverType?: 'plex' | 'jellyfin' | 'emby';
+
   @Column({ type: 'json', nullable: true })
   plexServers?: Array<{
     id: string;
@@ -29,6 +32,26 @@ export class UserSettings {
       IPv6?: boolean;
     }>;
     accessToken: string; // encrypted
+  }>;
+
+  @Column({ type: 'json', nullable: true })
+  jellyfinServers?: Array<{
+    id: string;
+    name: string;
+    address: string;
+    userId: string;
+    accessToken: string; // encrypted
+    clientId: string;
+  }>;
+
+  @Column({ type: 'json', nullable: true })
+  embyServers?: Array<{
+    id: string;
+    name: string;
+    address: string;
+    userId: string;
+    accessToken: string; // encrypted
+    clientId: string;
   }>;
 
   @Column({ type: 'varchar', nullable: true })

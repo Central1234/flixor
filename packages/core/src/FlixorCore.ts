@@ -222,16 +222,18 @@ export class FlixorCore {
 
   /**
    * Get the currently active media server service (unified interface)
-   * Returns the service for whichever server type is currently active
+   * Returns the service for Jellyfin/Emby servers that implement IMediaServerService.
+   * For Plex, use the plexServer getter directly as it has a different API.
    */
   get activeMediaServer(): IMediaServerService | null {
     switch (this._activeServerType) {
-      case 'plex':
-        return this._plexServer;
       case 'jellyfin':
         return this._jellyfinServer;
       case 'emby':
         return this._embyServer;
+      case 'plex':
+        // PlexServerService has a different API, use plexServer getter instead
+        return null;
       default:
         return null;
     }

@@ -29,6 +29,11 @@ export default function BrowseModal() {
       setTmdbCtx(null);
       try {
         if (bkey.startsWith('/plextv/watchlist')) {
+          // Only show Plex watchlist for Plex users
+          const session = await apiClient.getSession();
+          if (!session.authenticated || session.serverType !== 'plex') {
+            throw new Error('Watchlist is only available for Plex users');
+          }
           if (!s.plexTvToken) throw new Error('Plex Account Token missing. Add it in Settings.');
           const wl: any = await plexTvWatchlist(s.plexTvToken);
           const meta = wl?.MediaContainer?.Metadata || [];

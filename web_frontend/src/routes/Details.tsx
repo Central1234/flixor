@@ -138,13 +138,22 @@ export default function Details() {
               });
             }
             setBadges(bs);
-            // Build watch URL (first Part)
+            // Build watch URL (first Part) - only for Plex
             const part = media?.Part?.[0];
-            if (part?.id) {
+            const isJellyfinOrEmby = m._source === 'jellyfin' || m._source === 'emby';
+            if (isJellyfinOrEmby) {
+              // For Jellyfin/Emby, the Play button handles streaming via backendStreamUrl
+              // We still set plexWatch to a placeholder so the Play button appears
+              if (m.ratingKey) {
+                setPlexWatch(`plex:${m.ratingKey}`); // Navigation handled by Player component
+              }
+            } else if (part?.id) {
               const url = `${s.plexBaseUrl!.replace(/\/$/, '')}/library/parts/${part.id}/stream?X-Plex-Token=${s.plexToken}`;
               setPlexWatch(url);
             } else { setToast('No direct stream found. Open in Plex.'); }
-            setPlexDetailsUrl(`${s.plexBaseUrl!.replace(/\/$/, '')}/web/index.html#!/details?key=/library/metadata/${m.ratingKey}`);
+            if (!isJellyfinOrEmby) {
+              setPlexDetailsUrl(`${s.plexBaseUrl!.replace(/\/$/, '')}/web/index.html#!/details?key=/library/metadata/${m.ratingKey}`);
+            }
             // Versions
             const vs = (m.Media||[]).map((me:any, idx:number)=>({ id:String(me.id||idx), label: `${(me.width||0)>=3800?'4K':'HD'} ${String(me.videoCodec||'').toUpperCase()} ${me.audioChannels||''}` }));
             // Map version -> part id

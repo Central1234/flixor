@@ -51,6 +51,8 @@
     "semver": "^7.7.3"
   },
   "devDependencies": {
+    "@react-native-community/cli": "^20.1.0",
+    "@react-native-community/cli-platform-android": "^20.1.0",
     "@react-native-community/slider": "^5.0.1",
     "@types/react": "~19.1.10",
     "babel-preset-expo": "~54.0.0",

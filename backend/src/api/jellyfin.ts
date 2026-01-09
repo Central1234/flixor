@@ -1,0 +1,924 @@
+import { Router, Request, Response, NextFunction } from 'express';
+import axios from 'axios';
+import { AppDataSource } from '../db/data-source';
+import { User, UserSettings } from '../db/entities';
+import { AppError } from '../middleware/errorHandler';
+import { requireAuth, AuthenticatedRequest } from '../middleware/auth';
+import { createLogger } from '../utils/logger';
+import { encryptForUser, decryptForUser, isEncrypted } from '../utils/crypto';
+
+const router = Router();
+const logger = createLogger('jellyfin');
+
+// Helper to get Jellyfin auth header
+function getJellyfinAuthHeader(clientId: string, deviceName: string = 'Flixor Web', token?: string): string {
+  let auth = `MediaBrowser Client="Flixor", Device="${deviceName}", DeviceId="${clientId}", Version="1.0.0"`;
+  if (token) {
+    auth += `, Token="${token}"`;
+  }
+  return auth;
+}
+
+// Generate a client ID for this session
+function generateClientId(): string {
+  return 'flixor-' + Math.random().toString(36).substring(2, 15);
+}
+
+// Test connection to Jellyfin server
+router.post('/test', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { serverAddress } = req.body;
+
+    if (!serverAddress) {
+      return res.status(400).json({ success: false, error: 'Server address is required' });
+    }
+
+    // Normalize address
+    let normalizedAddress = serverAddress.trim();
+    if (!normalizedAddress.startsWith('http://') && !normalizedAddress.startsWith('https://')) {
+      normalizedAddress = 'http://' + normalizedAddress;
+    }
+    normalizedAddress = normalizedAddress.replace(/\/$/, '');
+
+    const clientId = generateClientId();
+
+    // Try to get server info
+    const response = await axios.get(`${normalizedAddress}/System/Info/Public`, {
+      headers: {
+        'Accept': 'application/json',
+        'X-Emby-Authorization': getJellyfinAuthHeader(clientId),
+      },
+      timeout: 10000,
+    });
+
+    if (response.data?.ServerName) {
+      res.json({
+        success: true,
+        serverName: response.data.ServerName,
+        serverId: response.data.Id,
+        version: response.data.Version,
+      });
+    } else {
+      res.json({ success: false, error: 'Invalid server response' });
+    }
+  } catch (error: any) {
+    logger.error('Jellyfin test connection failed:', error.message);
+    res.json({
+      success: false,
+      error: error.code === 'ECONNREFUSED' 
+        ? 'Could not connect to server' 
+        : error.message || 'Connection failed',
+    });
+  }
+});
+
+// Authenticate with Jellyfin server
+router.post('/login', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { serverAddress, username, password } = req.body;
+
+    if (!serverAddress || !username) {
+      return res.status(400).json({ success: false, error: 'Server address and username are required' });
+    }
+
+    // Normalize address
+    let normalizedAddress = serverAddress.trim();
+    if (!normalizedAddress.startsWith('http://') && !normalizedAddress.startsWith('https://')) {
+      normalizedAddress = 'http://' + normalizedAddress;
+    }
+    normalizedAddress = normalizedAddress.replace(/\/$/, '');
+
+    const clientId = generateClientId();
+
+    // Authenticate with Jellyfin
+    const response = await axios.post(
+      `${normalizedAddress}/Users/AuthenticateByName`,
+      {
+        Username: username,
+        Pw: password || '',
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Emby-Authorization': getJellyfinAuthHeader(clientId),
+        },
+        timeout: 15000,
+      }
+    );
+
+    const authResult = response.data;
+
+    if (!authResult.AccessToken || !authResult.User?.Id) {
+      return res.status(401).json({ success: false, error: 'Authentication failed' });
+    }
+
+    // Create or update user in database
+    const userRepository = AppDataSource.getRepository(User);
+    const settingsRepository = AppDataSource.getRepository(UserSettings);
+
+    // Use Jellyfin user ID as external ID
+    const externalId = `jellyfin:${authResult.ServerId}:${authResult.User.Id}`;
+    
+    let user = await userRepository.findOne({ where: { plexId: externalId } });
+    
+    if (!user) {
+      user = userRepository.create({
+        plexId: externalId, // Reusing plexId field for external ID
+        username: authResult.User.Name,
+        email: undefined,
+        plexToken: undefined, // Not used for Jellyfin
+        avatarUrl: authResult.User.PrimaryImageTag 
+          ? `${normalizedAddress}/Users/${authResult.User.Id}/Images/Primary?tag=${authResult.User.PrimaryImageTag}`
+          : undefined,
+      });
+      await userRepository.save(user);
+    } else {
+      // Update user info
+      user.username = authResult.User.Name;
+      user.avatarUrl = authResult.User.PrimaryImageTag 
+        ? `${normalizedAddress}/Users/${authResult.User.Id}/Images/Primary?tag=${authResult.User.PrimaryImageTag}`
+        : undefined;
+      await userRepository.save(user);
+    }
+
+    // Store Jellyfin server info in settings
+    let settings = await settingsRepository.findOne({ where: { userId: user.id } });
+    if (!settings) {
+      settings = settingsRepository.create({ userId: user.id });
+    }
+
+    // Store Jellyfin-specific settings
+    settings.jellyfinServers = [{
+      id: authResult.ServerId,
+      name: authResult.ServerName || 'Jellyfin Server',
+      address: normalizedAddress,
+      userId: authResult.User.Id,
+      accessToken: encryptForUser(user.id, authResult.AccessToken),
+      clientId,
+    }];
+    settings.currentServerId = authResult.ServerId;
+    settings.serverType = 'jellyfin';
+
+    await settingsRepository.save(settings);
+
+    // Set session
+    req.session.userId = user.id;
+    req.session.username = user.username;
+    req.session.serverType = 'jellyfin';
+
+    logger.info(`Jellyfin user authenticated: ${user.username}`);
+
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        username: user.username,
+        avatarUrl: user.avatarUrl,
+      },
+      server: {
+        id: authResult.ServerId,
+        name: authResult.ServerName,
+      },
+    });
+  } catch (error: any) {
+    logger.error('Jellyfin authentication failed:', error.message);
+    
+    if (error.response?.status === 401) {
+      return res.status(401).json({ success: false, error: 'Invalid username or password' });
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: error.code === 'ECONNREFUSED' 
+        ? 'Could not connect to server' 
+        : 'Authentication failed',
+    });
+  }
+});
+
+// Helper to get Jellyfin client info for authenticated user
+async function getJellyfinClient(userId: string) {
+  const settingsRepo = AppDataSource.getRepository(UserSettings);
+  const settings = await settingsRepo.findOne({ where: { userId } });
+
+  if (!settings?.jellyfinServers?.length) {
+    throw new AppError('No Jellyfin server configured', 400);
+  }
+
+  const server = settings.jellyfinServers[0];
+  const accessToken = isEncrypted(server.accessToken)
+    ? decryptForUser(userId, server.accessToken)
+    : server.accessToken;
+
+  return {
+    baseUrl: server.address,
+    userId: server.userId,
+    accessToken,
+    clientId: server.clientId,
+    serverName: server.name,
+  };
+}
+
+// Get libraries
+router.get('/libraries', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const client = await getJellyfinClient(req.user!.id);
+
+    const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Views`, {
+      headers: {
+        'Accept': 'application/json',
+        'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+      },
+    });
+
+    const libraries = (response.data.Items || []).map((lib: any) => ({
+      id: lib.Id,
+      key: lib.Id,
+      title: lib.Name,
+      type: lib.CollectionType === 'movies' ? 'movie' : lib.CollectionType === 'tvshows' ? 'show' : lib.CollectionType,
+      thumb: lib.ImageTags?.Primary ? `${client.baseUrl}/Items/${lib.Id}/Images/Primary?tag=${lib.ImageTags.Primary}` : null,
+    }));
+
+    res.json(libraries);
+  } catch (error: any) {
+    logger.error('Failed to get Jellyfin libraries:', error.message);
+    next(new AppError('Failed to get libraries', 500));
+  }
+});
+
+// Get library items
+router.get('/libraries/:libraryId', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const { libraryId } = req.params;
+    const { limit = 50, start = 0, sort = 'SortName' } = req.query;
+    const client = await getJellyfinClient(req.user!.id);
+
+    const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
+      params: {
+        ParentId: libraryId,
+        Limit: limit,
+        StartIndex: start,
+        SortBy: sort,
+        SortOrder: 'Ascending',
+        Fields: 'Overview,Genres,CommunityRating,CriticRating,OfficialRating,RunTimeTicks,PremiereDate,ProductionYear',
+        ImageTypeLimit: 1,
+        EnableImageTypes: 'Primary,Backdrop,Thumb',
+      },
+      headers: {
+        'Accept': 'application/json',
+        'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+      },
+    });
+
+    const items = (response.data.Items || []).map((item: any) => normalizeJellyfinItem(item, client.baseUrl));
+
+    res.json({
+      items,
+      totalSize: response.data.TotalRecordCount || items.length,
+    });
+  } catch (error: any) {
+    logger.error('Failed to get Jellyfin library items:', error.message);
+    next(new AppError('Failed to get library items', 500));
+  }
+});
+
+// Get continue watching
+router.get('/continue', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const client = await getJellyfinClient(req.user!.id);
+
+    const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items/Resume`, {
+      params: {
+        Limit: 20,
+        Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
+        ImageTypeLimit: 1,
+        EnableImageTypes: 'Primary,Backdrop,Thumb',
+        MediaTypes: 'Video',
+      },
+      headers: {
+        'Accept': 'application/json',
+        'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+      },
+    });
+
+    const items = (response.data.Items || []).map((item: any) => normalizeJellyfinItem(item, client.baseUrl));
+
+    res.json(items);
+  } catch (error: any) {
+    logger.error('Failed to get Jellyfin continue watching:', error.message);
+    next(new AppError('Failed to get continue watching', 500));
+  }
+});
+
+// Get latest items
+router.get('/latest', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const { libraryId } = req.query;
+    const client = await getJellyfinClient(req.user!.id);
+
+    const params: any = {
+      Limit: 20,
+      Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
+      ImageTypeLimit: 1,
+      EnableImageTypes: 'Primary,Backdrop,Thumb',
+    };
+    if (libraryId) params.ParentId = libraryId;
+
+    const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items/Latest`, {
+      params,
+      headers: {
+        'Accept': 'application/json',
+        'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+      },
+    });
+
+    const items = (response.data || []).map((item: any) => normalizeJellyfinItem(item, client.baseUrl));
+
+    res.json(items);
+  } catch (error: any) {
+    logger.error('Failed to get Jellyfin latest items:', error.message);
+    next(new AppError('Failed to get latest items', 500));
+  }
+});
+
+// Get item details
+router.get('/items/:itemId', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const { itemId } = req.params;
+    const client = await getJellyfinClient(req.user!.id);
+
+    const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items/${itemId}`, {
+      params: {
+        Fields: 'Overview,Genres,People,Studios,CommunityRating,CriticRating,OfficialRating,RunTimeTicks,PremiereDate,ProductionYear,Taglines,ExternalUrls',
+      },
+      headers: {
+        'Accept': 'application/json',
+        'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+      },
+    });
+
+    const item = normalizeJellyfinItem(response.data, client.baseUrl);
+    res.json(item);
+  } catch (error: any) {
+    logger.error('Failed to get Jellyfin item:', error.message);
+    next(new AppError('Failed to get item', 500));
+  }
+});
+
+// Search
+router.get('/search', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const { query, limit = 20 } = req.query;
+    if (!query) {
+      return res.json([]);
+    }
+
+    const client = await getJellyfinClient(req.user!.id);
+
+    const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
+      params: {
+        SearchTerm: query,
+        Limit: limit,
+        IncludeItemTypes: 'Movie,Series,Episode',
+        Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
+        ImageTypeLimit: 1,
+        EnableImageTypes: 'Primary,Backdrop,Thumb',
+        Recursive: true,
+      },
+      headers: {
+        'Accept': 'application/json',
+        'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+      },
+    });
+
+    const items = (response.data.Items || []).map((item: any) => normalizeJellyfinItem(item, client.baseUrl));
+
+    res.json(items);
+  } catch (error: any) {
+    logger.error('Failed to search Jellyfin:', error.message);
+    next(new AppError('Failed to search', 500));
+  }
+});
+
+// Helper to normalize Jellyfin items to Plex-like format
+function normalizeJellyfinItem(item: any, baseUrl: string) {
+  const type = item.Type === 'Movie' ? 'movie' : item.Type === 'Series' ? 'show' : item.Type === 'Episode' ? 'episode' : item.Type?.toLowerCase();
+  
+  // Build Plex-compatible Media array from Jellyfin MediaSources
+  const mediaArray = (item.MediaSources || []).map((ms: any, idx: number) => {
+    const videoStream = (ms.MediaStreams || []).find((s: any) => s.Type === 'Video');
+    const audioStream = (ms.MediaStreams || []).find((s: any) => s.Type === 'Audio');
+    
+    return {
+      id: ms.Id || item.Id,
+      duration: ms.RunTimeTicks ? Math.round(ms.RunTimeTicks / 10000) : null,
+      bitrate: ms.Bitrate ? Math.round(ms.Bitrate / 1000) : null,
+      width: videoStream?.Width,
+      height: videoStream?.Height,
+      videoCodec: videoStream?.Codec,
+      videoProfile: videoStream?.Profile,
+      audioCodec: audioStream?.Codec,
+      audioChannels: audioStream?.Channels,
+      container: ms.Container,
+      Part: [{
+        id: ms.Id || item.Id, // Use MediaSource ID as Part ID
+        key: `/Items/${item.Id}/stream`,
+        duration: ms.RunTimeTicks ? Math.round(ms.RunTimeTicks / 10000) : null,
+        size: ms.Size,
+        container: ms.Container,
+        Stream: (ms.MediaStreams || []).map((stream: any, sIdx: number) => ({
+          id: stream.Index || sIdx,
+          streamType: stream.Type === 'Video' ? 1 : stream.Type === 'Audio' ? 2 : stream.Type === 'Subtitle' ? 3 : 0,
+          codec: stream.Codec,
+          language: stream.Language,
+          languageTag: stream.Language,
+          displayTitle: stream.DisplayTitle || stream.Title || `${stream.Type} ${sIdx + 1}`,
+          channels: stream.Channels,
+          bitrate: stream.BitRate,
+          width: stream.Width,
+          height: stream.Height,
+        })),
+      }],
+    };
+  });
+
+  return {
+    ratingKey: item.Id,
+    key: `/library/metadata/${item.Id}`,
+    type,
+    title: item.Name,
+    originalTitle: item.OriginalTitle,
+    summary: item.Overview,
+    year: item.ProductionYear,
+    thumb: item.ImageTags?.Primary ? `${baseUrl}/Items/${item.Id}/Images/Primary?tag=${item.ImageTags.Primary}` : null,
+    art: item.BackdropImageTags?.length ? `${baseUrl}/Items/${item.Id}/Images/Backdrop?tag=${item.BackdropImageTags[0]}` : null,
+    duration: item.RunTimeTicks ? Math.round(item.RunTimeTicks / 10000) : null, // Convert ticks to ms
+    viewOffset: item.UserData?.PlaybackPositionTicks ? Math.round(item.UserData.PlaybackPositionTicks / 10000) : null,
+    rating: item.CommunityRating,
+    contentRating: item.OfficialRating,
+    genres: item.Genres || [],
+    addedAt: item.DateCreated ? new Date(item.DateCreated).getTime() / 1000 : null,
+    // Episode specific
+    parentTitle: item.SeriesName,
+    grandparentTitle: item.SeriesName,
+    parentIndex: item.ParentIndexNumber,
+    index: item.IndexNumber,
+    parentRatingKey: item.SeriesId,
+    grandparentRatingKey: item.SeriesId,
+    // Media info (Plex-compatible)
+    Media: mediaArray.length > 0 ? mediaArray : undefined,
+    // Source info
+    _source: 'jellyfin',
+  };
+}
+
+// ============ Plex-compatible routes for frontend compatibility ============
+
+// GET /ondeck - On deck / continue watching
+router.get('/ondeck', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const client = await getJellyfinClient(req.user!.id);
+
+    const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items/Resume`, {
+      params: {
+        Limit: 20,
+        Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
+        ImageTypeLimit: 1,
+        EnableImageTypes: 'Primary,Backdrop,Thumb',
+        MediaTypes: 'Video',
+      },
+      headers: {
+        'Accept': 'application/json',
+        'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+      },
+    });
+
+    const items = (response.data.Items || []).map((item: any) => normalizeJellyfinItem(item, client.baseUrl));
+    res.json(items);
+  } catch (error: any) {
+    logger.error('Failed to get Jellyfin ondeck:', error.message);
+    res.json([]); // Return empty array on error
+  }
+});
+
+// GET /recent - Recently added
+router.get('/recent', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const { library } = req.query;
+    const client = await getJellyfinClient(req.user!.id);
+
+    const params: any = {
+      Limit: 20,
+      Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
+      ImageTypeLimit: 1,
+      EnableImageTypes: 'Primary,Backdrop,Thumb',
+      SortBy: 'DateCreated',
+      SortOrder: 'Descending',
+    };
+    if (library) params.ParentId = library;
+
+    const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items/Latest`, {
+      params,
+      headers: {
+        'Accept': 'application/json',
+        'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+      },
+    });
+
+    const items = (response.data || []).map((item: any) => normalizeJellyfinItem(item, client.baseUrl));
+    res.json(items);
+  } catch (error: any) {
+    logger.error('Failed to get Jellyfin recent:', error.message);
+    res.json([]);
+  }
+});
+
+// GET /library/:sectionKey/all - Library items (Plex-style)
+router.get('/library/:sectionKey/all', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const { sectionKey } = req.params;
+    const { 'X-Plex-Container-Start': start = 0, 'X-Plex-Container-Size': limit = 50, sort } = req.query;
+    const client = await getJellyfinClient(req.user!.id);
+
+    // Map Plex sort to Jellyfin
+    let jellyfinSort = 'SortName';
+    let sortOrder = 'Ascending';
+    if (sort) {
+      const sortStr = String(sort);
+      if (sortStr.includes('addedAt')) {
+        jellyfinSort = 'DateCreated';
+        sortOrder = sortStr.includes(':desc') ? 'Descending' : 'Ascending';
+      } else if (sortStr.includes('title')) {
+        jellyfinSort = 'SortName';
+        sortOrder = sortStr.includes(':desc') ? 'Descending' : 'Ascending';
+      } else if (sortStr.includes('year')) {
+        jellyfinSort = 'ProductionYear';
+        sortOrder = sortStr.includes(':desc') ? 'Descending' : 'Ascending';
+      }
+    }
+
+    const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
+      params: {
+        ParentId: sectionKey,
+        Limit: limit,
+        StartIndex: start,
+        SortBy: jellyfinSort,
+        SortOrder: sortOrder,
+        Fields: 'Overview,Genres,CommunityRating,CriticRating,OfficialRating,RunTimeTicks,PremiereDate,ProductionYear',
+        ImageTypeLimit: 1,
+        EnableImageTypes: 'Primary,Backdrop,Thumb',
+        Recursive: true,
+        IncludeItemTypes: 'Movie,Series',
+      },
+      headers: {
+        'Accept': 'application/json',
+        'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+      },
+    });
+
+    const items = (response.data.Items || []).map((item: any) => normalizeJellyfinItem(item, client.baseUrl));
+
+    // Return in Plex MediaContainer format
+    res.json({
+      MediaContainer: {
+        size: items.length,
+        totalSize: response.data.TotalRecordCount || items.length,
+        offset: Number(start),
+        Metadata: items,
+      }
+    });
+  } catch (error: any) {
+    logger.error('Failed to get Jellyfin library items:', error.message);
+    res.json({ MediaContainer: { size: 0, totalSize: 0, Metadata: [] } });
+  }
+});
+
+// GET /metadata/:ratingKey - Get item metadata
+router.get('/metadata/:ratingKey', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const { ratingKey } = req.params;
+    const client = await getJellyfinClient(req.user!.id);
+
+    // Fetch both item metadata and playback info for MediaSources
+    const [metaResponse, playbackResponse] = await Promise.all([
+      axios.get(`${client.baseUrl}/Users/${client.userId}/Items/${ratingKey}`, {
+        params: {
+          Fields: 'Overview,Genres,People,Studios,CommunityRating,CriticRating,OfficialRating,RunTimeTicks,PremiereDate,ProductionYear,Taglines,ExternalUrls,ChildCount,MediaSources,MediaStreams',
+        },
+        headers: {
+          'Accept': 'application/json',
+          'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      }),
+      // Also fetch PlaybackInfo to get detailed MediaSources with streams
+      axios.get(`${client.baseUrl}/Items/${ratingKey}/PlaybackInfo`, {
+        params: {
+          UserId: client.userId,
+        },
+        headers: {
+          'Accept': 'application/json',
+          'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      }).catch(() => ({ data: {} })), // Don't fail if PlaybackInfo errors (e.g., for Series)
+    ]);
+
+    // Merge MediaSources from PlaybackInfo into item data
+    const itemData = { ...metaResponse.data };
+    if (playbackResponse.data.MediaSources?.length) {
+      itemData.MediaSources = playbackResponse.data.MediaSources;
+    }
+
+    const item = normalizeJellyfinItem(itemData, client.baseUrl);
+    res.json(item);
+  } catch (error: any) {
+    logger.error('Failed to get Jellyfin metadata:', error.message);
+    next(new AppError('Failed to get metadata', 500));
+  }
+});
+
+// GET /library/:sectionKey/:directory - Get secondary directory (genres, etc.)
+router.get('/library/:sectionKey/:directory', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const { sectionKey, directory } = req.params;
+    const client = await getJellyfinClient(req.user!.id);
+
+    // Map Plex-style directory names to Jellyfin
+    let items: any[] = [];
+    
+    if (directory === 'genre') {
+      // Get genres for this library
+      const response = await axios.get(`${client.baseUrl}/Genres`, {
+        params: {
+          ParentId: sectionKey,
+          UserId: client.userId,
+        },
+        headers: {
+          'Accept': 'application/json',
+          'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      });
+      items = (response.data.Items || []).map((g: any) => ({
+        key: g.Id,
+        title: g.Name,
+        type: 'genre',
+      }));
+    } else if (directory === 'year') {
+      // Get years for this library
+      const response = await axios.get(`${client.baseUrl}/Years`, {
+        params: {
+          ParentId: sectionKey,
+          UserId: client.userId,
+        },
+        headers: {
+          'Accept': 'application/json',
+          'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      });
+      items = (response.data.Items || []).map((y: any) => ({
+        key: y.Id,
+        title: y.Name,
+        type: 'year',
+      }));
+    }
+
+    res.json({ Directory: items });
+  } catch (error: any) {
+    logger.error('Failed to get Jellyfin secondary directory:', error.message);
+    res.json({ Directory: [] });
+  }
+});
+
+// GET /library/:sectionKey/collections - Get collections
+router.get('/library/:sectionKey/collections', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const { sectionKey } = req.params;
+    const client = await getJellyfinClient(req.user!.id);
+
+    const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
+      params: {
+        ParentId: sectionKey,
+        IncludeItemTypes: 'BoxSet',
+        Recursive: true,
+        Fields: 'Overview,PrimaryImageAspectRatio',
+        ImageTypeLimit: 1,
+        EnableImageTypes: 'Primary,Backdrop',
+      },
+      headers: {
+        'Accept': 'application/json',
+        'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+      },
+    });
+
+    const collections = (response.data.Items || []).map((c: any) => normalizeJellyfinItem(c, client.baseUrl));
+    res.json({ Metadata: collections });
+  } catch (error: any) {
+    logger.error('Failed to get Jellyfin collections:', error.message);
+    res.json({ Metadata: [] });
+  }
+});
+
+// GET /dir/* - Directory browsing (for children, seasons, episodes)
+router.get('/dir/*', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const path = req.params[0] || '';
+    const client = await getJellyfinClient(req.user!.id);
+
+    // Parse the path - could be /library/metadata/:id/children
+    const childrenMatch = path.match(/library\/metadata\/([^/]+)\/children/);
+    
+    if (childrenMatch) {
+      const parentId = childrenMatch[1];
+      const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
+        params: {
+          ParentId: parentId,
+          Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
+          ImageTypeLimit: 1,
+          EnableImageTypes: 'Primary,Backdrop,Thumb',
+        },
+        headers: {
+          'Accept': 'application/json',
+          'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      });
+
+      const items = (response.data.Items || []).map((item: any) => normalizeJellyfinItem(item, client.baseUrl));
+      res.json({ Metadata: items, Directory: [] });
+    } else {
+      res.json({ Metadata: [], Directory: [] });
+    }
+  } catch (error: any) {
+    logger.error('Failed to get Jellyfin directory:', error.message);
+    res.json({ Metadata: [], Directory: [] });
+  }
+});
+
+// POST /scrobble - Mark item as watched
+router.post('/scrobble', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const { ratingKey } = req.body;
+    if (!ratingKey) {
+      return res.status(400).json({ error: 'ratingKey is required' });
+    }
+
+    const client = await getJellyfinClient(req.user!.id);
+
+    await axios.post(`${client.baseUrl}/Users/${client.userId}/PlayedItems/${ratingKey}`, null, {
+      headers: {
+        'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+      },
+    });
+
+    res.json({ success: true });
+  } catch (error: any) {
+    logger.error('Failed to scrobble Jellyfin item:', error.message);
+    res.json({ success: false, error: error.message });
+  }
+});
+
+// DELETE /scrobble - Mark item as unwatched
+router.delete('/scrobble', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const { ratingKey } = req.body;
+    if (!ratingKey) {
+      return res.status(400).json({ error: 'ratingKey is required' });
+    }
+
+    const client = await getJellyfinClient(req.user!.id);
+
+    await axios.delete(`${client.baseUrl}/Users/${client.userId}/PlayedItems/${ratingKey}`, {
+      headers: {
+        'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+      },
+    });
+
+    res.json({ success: true });
+  } catch (error: any) {
+    logger.error('Failed to unscrobble Jellyfin item:', error.message);
+    res.json({ success: false, error: error.message });
+  }
+});
+
+// POST /favorite - Toggle favorite status
+router.post('/favorite', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const { ratingKey, favorite } = req.body;
+    if (!ratingKey) {
+      return res.status(400).json({ error: 'ratingKey is required' });
+    }
+
+    const client = await getJellyfinClient(req.user!.id);
+
+    if (favorite) {
+      await axios.post(`${client.baseUrl}/Users/${client.userId}/FavoriteItems/${ratingKey}`, null, {
+        headers: {
+          'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      });
+    } else {
+      await axios.delete(`${client.baseUrl}/Users/${client.userId}/FavoriteItems/${ratingKey}`, {
+        headers: {
+          'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      });
+    }
+
+    res.json({ success: true });
+  } catch (error: any) {
+    logger.error('Failed to toggle Jellyfin favorite:', error.message);
+    res.json({ success: false, error: error.message });
+  }
+});
+
+// GET /stream/:itemId - Get stream URL for playback
+router.get('/stream/:itemId', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const { itemId } = req.params;
+    const client = await getJellyfinClient(req.user!.id);
+
+    // Get playback info to find media sources
+    const response = await axios.get(`${client.baseUrl}/Items/${itemId}/PlaybackInfo`, {
+      params: {
+        UserId: client.userId,
+      },
+      headers: {
+        'Accept': 'application/json',
+        'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+      },
+    });
+
+    const mediaSources = response.data.MediaSources || [];
+    if (mediaSources.length === 0) {
+      return res.status(404).json({ error: 'No media sources found' });
+    }
+
+    const source = mediaSources[0];
+    const playSessionId = response.data.PlaySessionId;
+
+    // Build direct stream URL
+    const streamUrl = `${client.baseUrl}/Videos/${itemId}/stream?Static=true&mediaSourceId=${source.Id}&api_key=${client.accessToken}&PlaySessionId=${playSessionId}`;
+
+    res.json({
+      url: streamUrl,
+      playSessionId,
+      mediaSourceId: source.Id,
+      container: source.Container,
+      directPlay: source.SupportsDirectPlay,
+      directStream: source.SupportsDirectStream,
+    });
+  } catch (error: any) {
+    logger.error('Failed to get Jellyfin stream URL:', error.message);
+    next(new AppError('Failed to get stream URL', 500));
+  }
+});
+
+// POST /progress - Report playback progress
+router.post('/progress', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+  try {
+    const { ratingKey, time, duration, state } = req.body;
+    if (!ratingKey) {
+      return res.status(400).json({ error: 'ratingKey is required' });
+    }
+
+    const client = await getJellyfinClient(req.user!.id);
+    const positionTicks = Math.floor((time || 0) * 10000); // ms to ticks
+
+    const isPaused = state === 'paused';
+    const isStopped = state === 'stopped';
+
+    if (isStopped) {
+      // Report playback stopped
+      await axios.post(`${client.baseUrl}/Sessions/Playing/Stopped`, {
+        ItemId: ratingKey,
+        PositionTicks: positionTicks,
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      });
+    } else {
+      // Report playback progress
+      await axios.post(`${client.baseUrl}/Sessions/Playing/Progress`, {
+        ItemId: ratingKey,
+        PositionTicks: positionTicks,
+        IsPaused: isPaused,
+        CanSeek: true,
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      });
+    }
+
+    res.json({ success: true });
+  } catch (error: any) {
+    logger.error('Failed to update Jellyfin progress:', error.message);
+    // Don't fail the request, just log the error
+    res.json({ success: false, error: error.message });
+  }
+});
+
+export { router as jellyfinRouter };
+export default router;

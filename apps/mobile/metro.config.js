@@ -6,6 +6,9 @@ const monorepoRoot = path.resolve(projectRoot, '../..');
 
 const config = getDefaultConfig(projectRoot);
 
+// Explicitly set projectRoot to ensure bundler uses correct root
+config.projectRoot = projectRoot;
+
 // Watch all files in the monorepo
 config.watchFolders = [monorepoRoot];
 

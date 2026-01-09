@@ -8,6 +8,8 @@
 import { FlixorCore, type PlexMediaItem, type TMDBMedia } from '@flixor/core';
 import { getFlixorCore, initializeFlixorCore } from './index';
 
+export type ServerType = 'plex' | 'jellyfin' | 'emby' | null;
+
 export interface MobileHomeData {
   continueWatching: PlexMediaItem[];
   recentlyAdded: PlexMediaItem[];
@@ -39,7 +41,19 @@ export class FlixorMobile {
   }
 
   // ============================================
-  // Authentication
+  // Server Type Detection
+  // ============================================
+
+  get serverType(): ServerType {
+    return this.core.activeServerType;
+  }
+
+  get isAuthenticated(): boolean {
+    return this.core.isPlexAuthenticated || this.core.isJellyfinAuthenticated || this.core.isEmbyAuthenticated;
+  }
+
+  // ============================================
+  // Plex Authentication
   // ============================================
 
   get isPlexAuthenticated(): boolean {
@@ -51,7 +65,7 @@ export class FlixorMobile {
   }
 
   get isConnected(): boolean {
-    return this.core.isPlexServerConnected;
+    return this.core.isPlexServerConnected || this.core.isJellyfinServerConnected || this.core.isEmbyServerConnected;
   }
 
   async createPlexPin() {
@@ -71,6 +85,90 @@ export class FlixorMobile {
 
   async connectToServer(server: Awaited<ReturnType<typeof this.getServers>>[0]) {
     return this.core.connectToPlexServer(server);
+  }
+
+  // ============================================
+  // Jellyfin Authentication
+  // ============================================
+
+  get isJellyfinAuthenticated(): boolean {
+    return this.core.isJellyfinAuthenticated;
+  }
+
+  /**
+   * Test connection to a Jellyfin server
+   */
+  async testJellyfinConnection(address: string) {
+    return this.core.testJellyfinConnection(address);
+  }
+
+  /**
+   * Login to a Jellyfin server with username/password
+   */
+  async loginToJellyfin(serverUrl: string, username: string, password: string): Promise<void> {
+    await this.core.authenticateJellyfin({ address: serverUrl, username, password });
+  }
+
+  /**
+   * Get Jellyfin user info
+   */
+  async getJellyfinUser() {
+    if (!this.core.isJellyfinAuthenticated) return null;
+    return (this.core as any).jellyfinAuth;
+  }
+
+  async logoutJellyfin() {
+    await this.core.signOutJellyfin();
+  }
+
+  // ============================================
+  // Emby Authentication
+  // ============================================
+
+  get isEmbyAuthenticated(): boolean {
+    return this.core.isEmbyAuthenticated;
+  }
+
+  /**
+   * Test connection to an Emby server
+   */
+  async testEmbyConnection(address: string) {
+    return this.core.testEmbyConnection(address);
+  }
+
+  /**
+   * Login to an Emby server with username/password
+   */
+  async loginToEmby(serverUrl: string, username: string, password: string): Promise<void> {
+    await this.core.authenticateEmby({ address: serverUrl, username, password });
+  }
+
+  /**
+   * Get Emby user info
+   */
+  async getEmbyUser() {
+    if (!this.core.isEmbyAuthenticated) return null;
+    return (this.core as any).embyAuth;
+  }
+
+  async logoutEmby() {
+    await this.core.signOutEmby();
+  }
+
+  // ============================================
+  // Unified Logout
+  // ============================================
+
+  async logoutAll() {
+    const type = this.serverType;
+    if (type === 'plex') {
+      await this.core.signOutPlex();
+    } else if (type === 'jellyfin') {
+      await this.core.signOutJellyfin();
+    } else if (type === 'emby') {
+      await this.core.signOutEmby();
+    }
+    await this.core.signOutTrakt();
   }
 
   /**

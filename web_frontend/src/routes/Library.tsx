@@ -21,11 +21,9 @@ export default function Library() {
   const [active, setActive] = useState<string>('');
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'movies' | 'shows'>('all');
-  const [needsPlex, setNeedsPlex] = useState(false);
+  const [needsServer, setNeedsServer] = useState(false);
 
   useEffect(() => {
-    const s = loadSettings();
-    if (!s.plexBaseUrl || !s.plexToken) { setNeedsPlex(true); return; }
     async function load() {
       try {
         const libs: any = await plexBackendLibraries();
@@ -40,9 +38,9 @@ export default function Library() {
         const wantType: 'show'|'movie' | null = tab === 'tv' ? 'show' : tab === 'movies' ? 'movie' : null;
         const preferred = wantType ? secs.find((x: any) => x.type === wantType) : (secs[0] || null);
         if (preferred) setActive(preferred.key);
-        else setNeedsPlex(true);
+        else setNeedsServer(true);
       } catch (e) {
-        console.error(e); setNeedsPlex(true);
+        console.error(e); setNeedsServer(true);
       }
     }
     load();
@@ -72,8 +70,7 @@ export default function Library() {
   }, []);
 
   useEffect(() => {
-    const s = loadSettings();
-    if (!active || !s.plexBaseUrl || !s.plexToken) return;
+    if (!active) return;
     async function loadItems(reset = true) {
       const base = '?sort=addedAt:desc';
       const size = 100;
@@ -82,13 +79,14 @@ export default function Library() {
       const mc = all?.MediaContainer?.Metadata || [];
       const mapped: Item[] = mc.map((m: any, i: number) => {
         const p = m.thumb || m.parentThumb || m.grandparentThumb;
-        const img = apiClient.getPlexImageNoToken(p || '');
+        // Use full URL for Jellyfin/Emby, proxy for Plex
+        const img = p?.startsWith('http') ? p : apiClient.getPlexImageNoToken(p || '');
         return {
           id: String(m.ratingKey || i),
           title: m.title || m.grandparentTitle,
           image: img,
           subtitle: m.year ? String(m.year) : undefined,
-          badge: 'Plex',
+          badge: m._source === 'jellyfin' ? 'Jellyfin' : m._source === 'emby' ? 'Emby' : 'Plex',
         };
       });
       if (reset) setItems(mapped); else setItems((prev) => [...prev, ...mapped]);
@@ -104,7 +102,7 @@ export default function Library() {
 
   return (
     <div className="pb-8">
-      {!needsPlex && sections.length>0 ? (
+      {!needsServer && sections.length>0 ? (
         <div className="page-gutter pt-6 space-y-3">
           <div className="flex flex-wrap gap-2">
             {sections.map(s => (
@@ -121,9 +119,9 @@ export default function Library() {
         />
         </div>
       ) : (
-        <SectionBanner title="Libraries" message="Connect Plex to browse your Movies and TV Show libraries here." cta="Open Settings" to="/settings" />
+        <SectionBanner title="Libraries" message="Connect to a media server to browse your Movies and TV Show libraries here." cta="Open Settings" to="/settings" />
       )}
-      {!needsPlex && active && (
+      {!needsServer && active && (
         <div className="page-gutter mt-4">
           <div className="row-band">
             <VirtualGrid
@@ -134,9 +132,7 @@ export default function Library() {
               overscan={3}
               hasMore={hasMore}
               loadMore={() => {
-                if (!hasMore) return;
-                const s = loadSettings();
-                if (!s.plexBaseUrl || !s.plexToken || !active) return;
+                if (!hasMore || !active) return;
               // load next page
               (async () => {
                   const base = '?sort=addedAt:desc';

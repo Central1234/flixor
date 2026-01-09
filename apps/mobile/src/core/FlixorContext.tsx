@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, useMemo, useCallback } from 'react';
-import { FlixorMobile, initializeFlixorMobile } from './FlixorMobile';
+import { FlixorMobile, initializeFlixorMobile, type ServerType } from './FlixorMobile';
 
 interface FlixorContextValue {
   flixor: FlixorMobile | null;
@@ -7,6 +7,7 @@ interface FlixorContextValue {
   error: Error | null;
   isAuthenticated: boolean;
   isConnected: boolean;
+  serverType: ServerType;
   refresh: () => Promise<void>;
 }
 
@@ -16,6 +17,7 @@ const FlixorContext = createContext<FlixorContextValue>({
   error: null,
   isAuthenticated: false,
   isConnected: false,
+  serverType: null,
   refresh: async () => {},
 });
 
@@ -30,6 +32,7 @@ export function FlixorProvider({ children }: FlixorProviderProps) {
   const [authState, setAuthState] = useState({
     isAuthenticated: false,
     isConnected: false,
+    serverType: null as ServerType,
   });
 
   const initialize = async () => {
@@ -39,8 +42,9 @@ export function FlixorProvider({ children }: FlixorProviderProps) {
       const instance = await initializeFlixorMobile();
       setFlixor(instance);
       setAuthState({
-        isAuthenticated: instance.isPlexAuthenticated,
+        isAuthenticated: instance.isAuthenticated, // Unified: Plex, Jellyfin, or Emby
         isConnected: instance.isConnected,
+        serverType: instance.serverType,
       });
     } catch (e) {
       setError(e instanceof Error ? e : new Error('Failed to initialize'));
@@ -56,8 +60,9 @@ export function FlixorProvider({ children }: FlixorProviderProps) {
   const refresh = useCallback(async () => {
     if (flixor) {
       setAuthState({
-        isAuthenticated: flixor.isPlexAuthenticated,
+        isAuthenticated: flixor.isAuthenticated, // Unified: Plex, Jellyfin, or Emby
         isConnected: flixor.isConnected,
+        serverType: flixor.serverType,
       });
     }
   }, [flixor]);
@@ -68,8 +73,9 @@ export function FlixorProvider({ children }: FlixorProviderProps) {
     error,
     isAuthenticated: authState.isAuthenticated,
     isConnected: authState.isConnected,
+    serverType: authState.serverType,
     refresh,
-  }), [flixor, isLoading, error, authState.isAuthenticated, authState.isConnected, refresh]);
+  }), [flixor, isLoading, error, authState.isAuthenticated, authState.isConnected, authState.serverType, refresh]);
 
   return (
     <FlixorContext.Provider value={value}>

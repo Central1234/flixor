@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { PlexUserProfile, PlexUser, loadSettings, saveSettings } from '@/state/settings';
 import { apiClient, getCurrentUser } from '@/services/api';
 import { forget } from '@/services/cache';
+import { clearServerTypeCache } from '@/services/plex_backend';
 
 export default function UserDropdown() {
   const nav = useNavigate();
@@ -57,6 +58,9 @@ export default function UserDropdown() {
     try {
       // Logout from backend
       await apiClient.logout();
+
+      // Clear server type cache
+      clearServerTypeCache();
 
       // Clear local storage
       saveSettings({

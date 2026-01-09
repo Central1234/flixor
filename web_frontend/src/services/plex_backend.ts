@@ -1,9 +1,45 @@
-// Backend-backed Plex service (reads only for now)
-import { API_BASE_URL } from './api';
-const API_BASE = `${API_BASE_URL.replace(/\/$/, '')}/plex`;
+// Backend-backed Media service (supports Plex, Jellyfin, Emby)
+import { API_BASE_URL, apiClient } from './api';
+
+type ServerType = 'plex' | 'jellyfin' | 'emby';
+let cachedServerType: ServerType | null = null;
+
+// Get the current server type from session
+export async function getServerType(): Promise<ServerType> {
+  if (cachedServerType) {
+    console.debug('[plex_backend] Using cached serverType:', cachedServerType);
+    return cachedServerType;
+  }
+  
+  try {
+    const session = await apiClient.getSession();
+    console.debug('[plex_backend] Session response:', { authenticated: session.authenticated, serverType: session.serverType });
+    // Only cache if we have an authenticated session with serverType
+    if (session.authenticated && session.serverType) {
+      cachedServerType = session.serverType;
+      console.debug('[plex_backend] Cached serverType:', cachedServerType);
+      return cachedServerType;
+    }
+    // Return serverType if present, otherwise default to plex
+    const result = session.serverType || 'plex';
+    console.debug('[plex_backend] Returning serverType (not cached):', result);
+    return result;
+  } catch (e) {
+    console.warn('[plex_backend] Failed to get session, defaulting to plex:', e);
+    return 'plex';
+  }
+}
+
+// Clear cached server type (call on logout)
+export function clearServerTypeCache() {
+  cachedServerType = null;
+}
 
 async function backendFetch<T = any>(path: string, params?: Record<string, any>): Promise<T> {
-  const base = API_BASE.replace(/\/$/, '');
+  const serverType = await getServerType();
+  const prefix = serverType === 'plex' ? '/plex' : serverType === 'jellyfin' ? '/jellyfin' : '/emby';
+  const base = `${API_BASE_URL.replace(/\/$/, '')}${prefix}`;
+  
   let url = `${base}${path}`;
   if (params) {
     const qs = new URLSearchParams();
@@ -13,8 +49,9 @@ async function backendFetch<T = any>(path: string, params?: Record<string, any>)
     const q = qs.toString();
     if (q) url += (url.includes('?') ? '&' : '?') + q;
   }
+  console.debug('[plex_backend] Fetching:', url);
   const res = await fetch(url, { credentials: 'include' });
-  if (!res.ok) throw new Error(`Plex backend error ${res.status}`);
+  if (!res.ok) throw new Error(`Backend error ${res.status}`);
   return res.json();
 }
 

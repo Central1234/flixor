@@ -396,9 +396,11 @@ router.get('/session', async (req: Request, res: Response, next: NextFunction) =
     }
 
     const userRepository = AppDataSource.getRepository(User);
+    const settingsRepository = AppDataSource.getRepository(UserSettings);
+    
     const user = await userRepository.findOne({
       where: { id: req.session.userId },
-      select: ['id', 'username', 'email', 'thumb', 'subscription'],
+      select: ['id', 'username', 'email', 'thumb', 'subscription', 'avatarUrl'],
     });
 
     if (!user) {
@@ -406,13 +408,18 @@ router.get('/session', async (req: Request, res: Response, next: NextFunction) =
       return res.json({ authenticated: false });
     }
 
+    // Get server type from settings
+    const settings = await settingsRepository.findOne({ where: { userId: user.id } });
+    const serverType = settings?.serverType || req.session.serverType || 'plex';
+
     res.json({
       authenticated: true,
+      serverType,
       user: {
         id: user.id,
         username: user.username,
         email: user.email,
-        thumb: user.thumb,
+        thumb: user.thumb || user.avatarUrl,
         subscription: user.subscription,
       },
     });
@@ -460,14 +467,23 @@ router.post('/logout', (req: Request, res: Response, next: NextFunction) => {
 // Get Plex servers for authenticated user
 router.get('/servers', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
+    const settingsRepo = AppDataSource.getRepository(UserSettings);
+    const settings = await settingsRepo.findOne({ where: { userId: req.user!.id } });
+    
+    // Return empty array for non-Plex users
+    if (settings?.serverType && settings.serverType !== 'plex') {
+      return res.json([]);
+    }
+    
     const userRepository = AppDataSource.getRepository(User);
     const user = await userRepository.findOne({
       where: { id: req.user!.id },
       select: ['plexToken'],
     });
 
-    if (!user) {
-      throw new AppError('User not found', 404);
+    if (!user || !user.plexToken) {
+      // No Plex token - return empty array instead of error
+      return res.json([]);
     }
 
     const accountToken = isEncrypted(user.plexToken)

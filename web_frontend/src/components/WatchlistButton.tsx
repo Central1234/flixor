@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { plexTvWatchlist, plexTvAddToWatchlist, plexTvRemoveFromWatchlist } from '@/services/plextv';
 import { traktAddToWatchlist, traktRemoveFromWatchlist, getTraktTokens, traktGetWatchlist } from '@/services/trakt';
 import { loadSettings } from '@/state/settings';
+import { apiClient } from '@/services/api';
 
 interface WatchlistButtonProps {
   itemId: string;
@@ -70,8 +71,13 @@ export default function WatchlistButton({
         setIsInList(foundT);
         return;
       }
-      // Fallback: try Plex.tv (best-effort)
+      // Fallback: try Plex.tv (best-effort) - only for Plex users
       try {
+        const session = await apiClient.getSession();
+        if (!session.authenticated || session.serverType !== 'plex') {
+          setIsInList(false);
+          return;
+        }
         const watchlist = await plexTvWatchlist();
         const items = watchlist.MediaContainer?.Metadata || [];
         const normalizedId = String(itemId || '').startsWith('plex:') ? String(itemId).replace(/^plex:/,'') : String(itemId);

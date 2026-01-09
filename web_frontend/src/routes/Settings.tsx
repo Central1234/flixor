@@ -4,6 +4,7 @@ import { forget } from '@/services/cache';
 import { apiClient } from '@/services/api';
 import { TraktAuth } from '@/components/TraktAuth';
 import { getTraktTokens } from '@/services/trakt';
+import { getServerType, clearServerTypeCache } from '@/services/plex_backend';
 
 export default function Settings() {
   const initial = loadSettings();
@@ -22,6 +23,24 @@ export default function Settings() {
   const [showEndpointsFor, setShowEndpointsFor] = useState<string | null>(null);
   const [endpoints, setEndpoints] = useState<Record<string, { uri: string; isCurrent: boolean; isPreferred: boolean }[]>>({});
   const [backendServers, setBackendServers] = useState<any[]>([]);
+  const [serverType, setServerType] = useState<'plex' | 'jellyfin' | 'emby'>('plex');
+  const [sessionInfo, setSessionInfo] = useState<any>(null);
+
+  // Fetch server type and session info on mount
+  useEffect(() => {
+    async function loadServerInfo() {
+      try {
+        const type = await getServerType();
+        setServerType(type);
+        // Also fetch session to get user info
+        const session = await apiClient.getSession();
+        setSessionInfo(session);
+      } catch (e) {
+        console.error('Failed to load server info:', e);
+      }
+    }
+    loadServerInfo();
+  }, []);
 
   useEffect(() => {
     saveSettings({ plexBaseUrl: plexUrl, plexToken, tmdbBearer: tmdbKey, traktClientId: traktKey, plexTvToken, watchlistProvider });
@@ -37,9 +56,48 @@ export default function Settings() {
     <div className="min-h-screen">
       <div className="max-w-3xl mx-auto p-6 space-y-8 pt-6">
       <section>
-        <h2 className="text-xl font-semibold mb-2">Accounts</h2>
+        <h2 className="text-xl font-semibold mb-2">Media Server</h2>
         <div className="grid gap-3">
-          {/* Plex authentication via PIN */}
+          {/* Server Type Badge */}
+          <div className="rounded-lg ring-1 ring-white/10 p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <div className="text-sm text-neutral-300">Connected Server</div>
+                <div className="flex items-center gap-2 mt-1">
+                  <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                    serverType === 'jellyfin' ? 'bg-purple-600 text-white' :
+                    serverType === 'emby' ? 'bg-green-600 text-white' :
+                    'bg-orange-500 text-white'
+                  }`}>
+                    {serverType === 'jellyfin' ? 'Jellyfin' : serverType === 'emby' ? 'Emby' : 'Plex'}
+                  </span>
+                  {sessionInfo?.user?.username && (
+                    <span className="text-neutral-200 text-sm">{sessionInfo.user.username}</span>
+                  )}
+                </div>
+              </div>
+              <button className="btn" onClick={async () => {
+                // Sign out - call backend logout and clear cache
+                try {
+                  await fetch(`${import.meta.env.VITE_API_URL || ''}/api/auth/logout`, { method: 'POST', credentials: 'include' });
+                } catch {}
+                clearServerTypeCache();
+                saveSettings({ plexAccountToken: undefined, plexServer: undefined, plexBaseUrl: undefined, plexToken: undefined });
+                window.location.href = '/login';
+              }}>Sign Out</button>
+            </div>
+            
+            {/* Server-specific info */}
+            {(serverType === 'jellyfin' || serverType === 'emby') && sessionInfo?.authenticated && (
+              <div className="text-sm text-neutral-400 mt-2">
+                <div>Logged in via {serverType === 'jellyfin' ? 'Jellyfin' : 'Emby'} server authentication.</div>
+                <div className="mt-1 text-neutral-500">To change servers, sign out and log in with a different {serverType === 'jellyfin' ? 'Jellyfin' : 'Emby'} server.</div>
+              </div>
+            )}
+          </div>
+
+          {/* Plex-specific authentication section */}
+          {serverType === 'plex' && (
           <div className="rounded-lg ring-1 ring-white/10 p-4">
             <div className="flex items-center justify-between">
               <div>
@@ -123,6 +181,7 @@ export default function Settings() {
               </div>
             )}
           </div>
+          )}
 
           {/* Trakt Authentication */}
           <div className="mt-6">
@@ -137,9 +196,14 @@ export default function Settings() {
             />
           </div>
 
-          <L label="Plex URL"><input value={plexUrl} onChange={(e) => setPlexUrl(e.target.value)} placeholder="https://app.plex.tv" className="input" /></L>
-          <L label="Plex Token"><input value={plexToken} onChange={(e) => setPlexToken(e.target.value)} placeholder="" className="input" /></L>
+          {serverType === 'plex' && (
+            <>
+              <L label="Plex URL"><input value={plexUrl} onChange={(e) => setPlexUrl(e.target.value)} placeholder="https://app.plex.tv" className="input" /></L>
+              <L label="Plex Token"><input value={plexToken} onChange={(e) => setPlexToken(e.target.value)} placeholder="" className="input" /></L>
+            </>
+          )}
           <L label="TMDB API Key"><input value={tmdbKey} onChange={(e) => setTmdbKey(e.target.value)} className="input" /></L>
+          {serverType === 'plex' && (
           <L label="Watchlist Provider">
             <select
               className="input"
@@ -157,6 +221,7 @@ export default function Settings() {
               <div className="text-xs text-yellow-300 mt-1">Trakt not connected — use the Trakt section above to sign in.</div>
             )}
           </L>
+          )}
           <div className="flex gap-3 pt-2">
             <button className="btn" onClick={async () => {
               setTmdbStatus('Testing…');
@@ -170,6 +235,7 @@ export default function Settings() {
             }}>Test TMDB</button>
             <span className="text-sm text-neutral-400">{tmdbStatus}</span>
           </div>
+          {serverType === 'plex' && (
           <div className="flex gap-3">
             <button className="btn" onClick={async () => {
               setPlexStatus('Testing…');
@@ -183,15 +249,16 @@ export default function Settings() {
             }}>Test Plex</button>
             <span className="text-sm text-neutral-400">{plexStatus}</span>
           </div>
+          )}
           <div className="flex gap-3">
             <button className="btn" onClick={()=> { forget(''); alert('Cache cleared'); }}>Clear App Cache</button>
-            <button className="btn" onClick={()=> { saveSettings({ plexAccountToken: undefined, plexServer: undefined }); alert('Signed out from Plex'); }}>Sign out of Plex</button>
           </div>
         </div>
       </section>
-      {/* Backend-managed servers section */}
+      {/* Backend-managed servers section - Plex only */}
+      {serverType === 'plex' && (
       <section>
-        <h2 className="text-xl font-semibold mb-2">Backend Servers</h2>
+        <h2 className="text-xl font-semibold mb-2">Plex Servers</h2>
         <div className="rounded-lg ring-1 ring-white/10 p-4">
           <div className="flex items-center justify-between mb-3">
             <div className="text-sm text-neutral-300">Servers known to the backend (used for library/search).</div>
@@ -246,7 +313,8 @@ export default function Settings() {
           )}
         </div>
       </section>
-      {showEndpointsFor && (
+      )}
+      {showEndpointsFor && serverType === 'plex' && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
           <div className="bg-neutral-900 rounded-lg p-4 w-full max-w-lg ring-1 ring-white/10">
             <div className="flex items-center justify-between mb-3">

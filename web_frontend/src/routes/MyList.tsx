@@ -79,6 +79,12 @@ export default function MyList() {
 
   async function loadPlexWatchlist(): Promise<WatchlistItem[]> {
     try {
+      // Only load Plex watchlist for Plex users
+      const session = await apiClient.getSession();
+      if (!session.authenticated || session.serverType !== 'plex') {
+        return [];
+      }
+      
       const data = await plexTvWatchlist();
       const items = data.MediaContainer?.Metadata || [];
 

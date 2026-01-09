@@ -28,12 +28,18 @@ export default function TopNav() {
       setServers(s.plexServers);
     }
 
-    // Auto-fetch servers if no servers list is available
-    if (!s.plexServers || s.plexServers.length === 0) {
-      setLoadingServers(true);
+    // Auto-fetch servers if no servers list is available (Plex users only)
+    const checkAndFetchServers = async () => {
+      // Only sync Plex servers for Plex users
+      const session = await apiClient.getSession();
+      if (session.serverType && session.serverType !== 'plex') {
+        setLoadingServers(false);
+        return;
+      }
+      
+      if (!s.plexServers || s.plexServers.length === 0) {
+        setLoadingServers(true);
 
-      // Try backend first, then Plex.tv
-      const fetchServers = async () => {
         let list: Array<{ name: string; clientIdentifier: string; bestUri: string; token: string }> = [];
         // Try backend API
         try {
@@ -76,12 +82,11 @@ export default function TopNav() {
             }));
           }
         }
-      };
-
-      fetchServers().finally(() => {
         setLoadingServers(false);
-      });
-    }
+      }
+    };
+
+    checkAndFetchServers();
   }, []);
 
   // Track scroll and drive background fade with rAF for smoothness
@@ -125,6 +130,12 @@ export default function TopNav() {
   }, [pathname]);
 
   async function doRefresh() {
+    // Only sync Plex servers for Plex users
+    const session = await apiClient.getSession();
+    if (session.serverType && session.serverType !== 'plex') {
+      return;
+    }
+    
     setLoadingServers(true);
     try {
       let list: Array<{ name: string; clientIdentifier: string; bestUri: string; token: string }> = [];

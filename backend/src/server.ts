@@ -23,6 +23,8 @@ import tmdbRoutes from './api/tmdb';
 import plexRoutes from './api/plex';
 import traktRoutes from './api/trakt';
 import plextvRoutes from './api/plextv';
+import { jellyfinRouter } from './api/jellyfin';
+import { embyRouter } from './api/emby';
 import { errorHandler } from './middleware/errorHandler';
 import { requestLogger } from './middleware/requestLogger';
 
@@ -113,6 +115,10 @@ async function startServer() {
 
     // API routes
     app.use('/api/auth', authRouter);
+    app.use('/api/auth/jellyfin', jellyfinRouter);
+    app.use('/api/auth/emby', embyRouter);
+    app.use('/api/jellyfin', jellyfinRouter);  // Library endpoints
+    app.use('/api/emby', embyRouter);          // Library endpoints
     app.use('/api/cache', cacheRoutes);
     app.use('/api/image', imageProxyRoutes);
     app.use('/api/tmdb', tmdbRoutes);

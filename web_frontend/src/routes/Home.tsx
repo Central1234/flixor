@@ -46,21 +46,24 @@ export default function Home() {
         return;
       }
 
-      // Get servers from backend
+      // Get servers from backend (Plex users only)
       try {
-        const servers = await apiClient.getServers();
-        if (servers.length > 0) {
-          const server = servers[0];
-          saveSettings({
-            plexBaseUrl: server.baseUrl,
-            plexToken: server.token,
-            plexServer: {
-              name: server.name,
-              clientIdentifier: server.clientIdentifier,
-              baseUrl: server.baseUrl,
-              token: server.token
-            }
-          });
+        const session = await apiClient.getSession();
+        if (session.authenticated && session.serverType === 'plex') {
+          const servers = await apiClient.getServers();
+          if (servers.length > 0) {
+            const server = servers[0];
+            saveSettings({
+              plexBaseUrl: server.baseUrl,
+              plexToken: server.token,
+              plexServer: {
+                name: server.name,
+                clientIdentifier: server.clientIdentifier,
+                baseUrl: server.baseUrl,
+                token: server.token
+              }
+            });
+          }
         }
       } catch (err) {
         console.error('Failed to get servers:', err);
@@ -138,42 +141,46 @@ export default function Home() {
           rowsData.push({ title: 'Trending Now', items: landscape.slice(8, 16) });
         }
         // Trakt content will be handled by TraktSection components below
-        // Continue Watching via Plex if configured
+        // Continue Watching - works for Plex, Jellyfin, and Emby
         // eslint-disable-next-line no-console
-        console.info('[Home] Using backend for Plex reads');
-        if (s.plexBaseUrl && s.plexToken) {
-          try {
-            const deck: any = await plexBackendContinue();
-            const meta = deck?.MediaContainer?.Metadata || [];
-            const items: any[] = meta.slice(0, 10).map((m: any, i: number) => {
-              const p = m.thumb || m.parentThumb || m.grandparentThumb || m.art;
-              const img = apiClient.getPlexImageNoToken(p || '');
-              const duration = (m.duration || 0) / 1000;
-              const vo = (m.viewOffset || 0) / 1000;
-              const progress = duration > 0 ? Math.min(100, Math.max(1, Math.round((vo / duration) * 100))) : 0;
-              return { id: `plex:${String(m.ratingKey || i)}`, title: m.title || m.grandparentTitle || 'Continue', image: img, progress };
-            });
+        console.info('[Home] Using backend for media reads');
+        // Always try to load continue watching - the backend handles server type detection
+        try {
+          const deck: any = await plexBackendContinue();
+          const meta = deck?.MediaContainer?.Metadata || [];
+          const items: any[] = meta.slice(0, 10).map((m: any, i: number) => {
+            const p = m.thumb || m.parentThumb || m.grandparentThumb || m.art;
+            // Use full URL for Jellyfin/Emby, proxy for Plex
+            const img = p?.startsWith('http') ? p : apiClient.getPlexImageNoToken(p || '');
+            const duration = (m.duration || 0) / 1000;
+            const vo = (m.viewOffset || 0) / 1000;
+            const progress = duration > 0 ? Math.min(100, Math.max(1, Math.round((vo / duration) * 100))) : 0;
+            return { id: `media:${String(m.ratingKey || i)}`, title: m.title || m.grandparentTitle || 'Continue', image: img, progress };
+          });
+          if (items.length > 0) {
             rowsData.splice(1, 0, { title: 'Continue Watching', items: items as any, variant: 'continue' });
-          } catch (e) {
-            setNeedsPlex(true);
           }
-          // Watchlist via Plex.tv if configured
-          if (true) {
-            try {
-              const wl: any = await plexTvWatchlist();
-              const meta = wl?.MediaContainer?.Metadata || [];
-              const wlItems: Item[] = meta.slice(0, 12).map((m: any, i: number) => ({
-                id: inferIdFromGuid(m) || `${encodeURIComponent(m.tmdbGuid||'')}`,
-                title: m.title || m.grandparentTitle || 'Title',
-                image: m.Image?.find((img: any) => img.type === 'coverArt' || img.type === 'background')?.url,
-              }));
-              const row: any = { title: 'Watchlist', items: wlItems };
-              row.browseKey = '/plextv/watchlist';
-              rowsData.push(row);
-            } catch {}
+        } catch (e) {
+          console.warn('Failed to load continue watching:', e);
+        }
+        // Plex.tv Watchlist - only for Plex users
+        try {
+          const session = await apiClient.getSession();
+          if (session.authenticated && session.serverType === 'plex') {
+            const wl: any = await plexTvWatchlist();
+            const meta = wl?.MediaContainer?.Metadata || [];
+            const wlItems: Item[] = meta.slice(0, 12).map((m: any, i: number) => ({
+              id: inferIdFromGuid(m) || `${encodeURIComponent(m.tmdbGuid||'')}`,
+              title: m.title || m.grandparentTitle || 'Title',
+              image: m.Image?.find((img: any) => img.type === 'coverArt' || img.type === 'background')?.url,
+            }));
+            const row: any = { title: 'Watchlist', items: wlItems };
+            row.browseKey = '/plextv/watchlist';
+            rowsData.push(row);
           }
-          // Genre-based rows from first matching library containing that genre
-          try {
+        } catch {}
+        // Genre-based rows from first matching library containing that genre
+        try {
             const libs: any = await plexBackendLibraries();
             const dirs = libs?.MediaContainer?.Directory || [];
             for (const gr of genreRows) {
@@ -188,8 +195,9 @@ export default function Home() {
                 const meta = data?.MediaContainer?.Metadata || [];
                 const items: Item[] = meta.slice(0, 12).map((m: any) => {
                   const p = m.thumb || m.parentThumb || m.grandparentThumb || m.art;
-                  const img = apiClient.getPlexImageNoToken(p || '');
-                  return { id: `plex:${m.ratingKey}`, title: m.title || m.grandparentTitle || 'Title', image: img };
+                  // Use full URL for Jellyfin/Emby, proxy for Plex
+                  const img = p?.startsWith('http') ? p : apiClient.getPlexImageNoToken(p || '');
+                  return { id: `media:${m.ratingKey}`, title: m.title || m.grandparentTitle || 'Title', image: img };
                 });
                 const row: any = { title: gr.label, items };
                 row.browseKey = path;
@@ -252,9 +260,6 @@ export default function Home() {
               break;
             }
           } catch (e) { /* ignore */ }
-        } else {
-          setNeedsPlex(true);
-        }
         setRows(rowsData);
         // Commit hero once with final choice (prefer Plex)
         const finalHero = plexHero || tmdbHero;

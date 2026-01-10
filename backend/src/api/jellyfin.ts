@@ -538,7 +538,10 @@ router.get('/recent', requireAuth, async (req: AuthenticatedRequest, res: Respon
 router.get('/library/:sectionKey/all', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     const { sectionKey } = req.params;
-    const { 'X-Plex-Container-Start': start = 0, 'X-Plex-Container-Size': limit = 50, sort } = req.query;
+    // Support both Plex-style headers and simple query params
+    const start = req.query.offset || req.query['X-Plex-Container-Start'] || 0;
+    const limit = req.query.limit || req.query['X-Plex-Container-Size'] || 100;
+    const { sort } = req.query;
     const client = await getJellyfinClient(req.user!.id);
 
     // Map Plex sort to Jellyfin
@@ -558,11 +561,13 @@ router.get('/library/:sectionKey/all', requireAuth, async (req: AuthenticatedReq
       }
     }
 
+    logger.info('[Jellyfin /library/all] Fetching items for section:', sectionKey, 'start:', start, 'limit:', limit);
+
     const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
       params: {
         ParentId: sectionKey,
-        Limit: limit,
-        StartIndex: start,
+        Limit: Number(limit),
+        StartIndex: Number(start),
         SortBy: jellyfinSort,
         SortOrder: sortOrder,
         Fields: 'Overview,Genres,CommunityRating,CriticRating,OfficialRating,RunTimeTicks,PremiereDate,ProductionYear',
@@ -576,6 +581,8 @@ router.get('/library/:sectionKey/all', requireAuth, async (req: AuthenticatedReq
         'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
       },
     });
+
+    logger.info('[Jellyfin /library/all] Got', response.data.Items?.length, 'items out of', response.data.TotalRecordCount, 'total');
 
     const items = (response.data.Items || []).map((item: any) => normalizeJellyfinItem(item, client.baseUrl));
 
@@ -718,16 +725,25 @@ router.get('/library/:sectionKey/collections', requireAuth, async (req: Authenti
   }
 });
 
-// GET /dir/* - Directory browsing (for children, seasons, episodes)
+// GET /dir/* - Directory browsing (for children, seasons, episodes, and genre/filter browsing)
 router.get('/dir/*', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     const path = req.params[0] || '';
     const client = await getJellyfinClient(req.user!.id);
     logger.info('[Jellyfin /dir] Request path:', path);
 
-    // Parse the path - could be /library/metadata/:id/children
+    // Pattern: /library/metadata/{id}/children - for seasons/episodes
     const childrenMatch = path.match(/library\/metadata\/([^/]+)\/children/);
     
+    // Pattern: /library/sections/{sectionKey}/genre/{genreId} - for genre browsing
+    const genreMatch = path.match(/library\/sections\/([^/]+)\/genre\/([^/]+)/);
+    
+    // Pattern: /library/sections/{sectionKey}/year/{year} - for year browsing  
+    const yearMatch = path.match(/library\/sections\/([^/]+)\/year\/([^/]+)/);
+    
+    // Pattern: /library/sections/{sectionKey}/all - for all items in section
+    const allMatch = path.match(/library\/sections\/([^/]+)\/all/);
+
     if (childrenMatch) {
       const parentId = childrenMatch[1];
       logger.info('[Jellyfin /dir] Fetching children for parentId:', parentId);
@@ -804,7 +820,81 @@ router.get('/dir/*', requireAuth, async (req: AuthenticatedRequest, res: Respons
       }
       
       res.json({ Metadata: items, Directory: [] });
+    } else if (genreMatch) {
+      // Handle genre browsing: /library/sections/{sectionKey}/genre/{genreId}
+      const sectionKey = genreMatch[1];
+      const genreId = genreMatch[2];
+      logger.info('[Jellyfin /dir] Fetching items by genre:', genreId, 'in section:', sectionKey);
+      
+      const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
+        params: {
+          ParentId: sectionKey,
+          GenreIds: genreId,
+          Recursive: true,
+          Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
+          ImageTypeLimit: 1,
+          EnableImageTypes: 'Primary,Backdrop,Thumb',
+          Limit: 50,
+        },
+        headers: {
+          'Accept': 'application/json',
+          'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      });
+
+      const items = (response.data.Items || []).map((item: any) => normalizeJellyfinItem(item, client.baseUrl));
+      logger.info('[Jellyfin /dir] Genre items count:', items.length);
+      res.json({ Metadata: items, Directory: [] });
+    } else if (yearMatch) {
+      // Handle year browsing: /library/sections/{sectionKey}/year/{year}
+      const sectionKey = yearMatch[1];
+      const year = yearMatch[2];
+      logger.info('[Jellyfin /dir] Fetching items by year:', year, 'in section:', sectionKey);
+      
+      const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
+        params: {
+          ParentId: sectionKey,
+          Years: year,
+          Recursive: true,
+          Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
+          ImageTypeLimit: 1,
+          EnableImageTypes: 'Primary,Backdrop,Thumb',
+          Limit: 50,
+        },
+        headers: {
+          'Accept': 'application/json',
+          'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      });
+
+      const items = (response.data.Items || []).map((item: any) => normalizeJellyfinItem(item, client.baseUrl));
+      logger.info('[Jellyfin /dir] Year items count:', items.length);
+      res.json({ Metadata: items, Directory: [] });
+    } else if (allMatch) {
+      // Handle all items: /library/sections/{sectionKey}/all
+      const sectionKey = allMatch[1];
+      logger.info('[Jellyfin /dir] Fetching all items in section:', sectionKey);
+      
+      const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
+        params: {
+          ParentId: sectionKey,
+          Recursive: true,
+          Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
+          ImageTypeLimit: 1,
+          EnableImageTypes: 'Primary,Backdrop,Thumb',
+          Limit: 100,
+        },
+        headers: {
+          'Accept': 'application/json',
+          'X-Emby-Authorization': getJellyfinAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      });
+
+      const items = (response.data.Items || []).map((item: any) => normalizeJellyfinItem(item, client.baseUrl));
+      logger.info('[Jellyfin /dir] All items count:', items.length);
+      res.json({ Metadata: items, Directory: [] });
     } else {
+      logger.warn('[Jellyfin /dir] Unhandled path pattern:', path);
       res.json({ Metadata: [], Directory: [] });
     }
   } catch (error: any) {

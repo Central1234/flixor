@@ -302,7 +302,17 @@ router.get('/continue', requireAuth, async (req: AuthenticatedRequest, res: Resp
       },
     });
 
+    logger.info('[Emby /continue] Raw items count:', response.data.Items?.length || 0);
+    if (response.data.Items?.[0]) {
+      logger.info('[Emby /continue] First raw item Id:', response.data.Items[0].Id, 'Name:', response.data.Items[0].Name, 'Type:', response.data.Items[0].Type);
+    }
+
     const items = (response.data.Items || []).map((item: any) => normalizeEmbyItem(item, client.baseUrl));
+    
+    logger.info('[Emby /continue] Normalized items count:', items.length);
+    if (items[0]) {
+      logger.info('[Emby /continue] First normalized item ratingKey:', items[0].ratingKey, 'title:', items[0].title, 'type:', items[0].type);
+    }
 
     res.json(items);
   } catch (error: any) {
@@ -536,7 +546,10 @@ router.get('/recent', requireAuth, async (req: AuthenticatedRequest, res: Respon
 router.get('/library/:sectionKey/all', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     const { sectionKey } = req.params;
-    const { 'X-Plex-Container-Start': start = 0, 'X-Plex-Container-Size': limit = 50, sort } = req.query;
+    // Support both Plex-style headers and simple query params
+    const start = req.query.offset || req.query['X-Plex-Container-Start'] || 0;
+    const limit = req.query.limit || req.query['X-Plex-Container-Size'] || 100;
+    const { sort } = req.query;
     const client = await getEmbyClient(req.user!.id);
 
     // Map Plex sort to Emby
@@ -556,11 +569,13 @@ router.get('/library/:sectionKey/all', requireAuth, async (req: AuthenticatedReq
       }
     }
 
+    logger.info('[Emby /library/all] Fetching items for section:', sectionKey, 'start:', start, 'limit:', limit);
+
     const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
       params: {
         ParentId: sectionKey,
-        Limit: limit,
-        StartIndex: start,
+        Limit: Number(limit),
+        StartIndex: Number(start),
         SortBy: embySort,
         SortOrder: sortOrder,
         Fields: 'Overview,Genres,CommunityRating,CriticRating,OfficialRating,RunTimeTicks,PremiereDate,ProductionYear',
@@ -574,6 +589,8 @@ router.get('/library/:sectionKey/all', requireAuth, async (req: AuthenticatedReq
         'X-Emby-Authorization': getEmbyAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
       },
     });
+
+    logger.info('[Emby /library/all] Got', response.data.Items?.length, 'items out of', response.data.TotalRecordCount, 'total');
 
     const items = (response.data.Items || []).map((item: any) => normalizeEmbyItem(item, client.baseUrl));
 
@@ -719,15 +736,25 @@ router.get('/library/:sectionKey/collections', requireAuth, async (req: Authenti
   }
 });
 
-// GET /dir/* - Directory browsing (for children, seasons, episodes)
+// GET /dir/* - Directory browsing (for children, seasons, episodes, and genre/filter browsing)
 router.get('/dir/*', requireAuth, async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
   try {
     const path = req.params[0] || '';
     const client = await getEmbyClient(req.user!.id);
     logger.info('[Emby /dir] Request path:', path);
 
+    // Pattern: /library/metadata/{id}/children - for seasons/episodes
     const childrenMatch = path.match(/library\/metadata\/([^/]+)\/children/);
     
+    // Pattern: /library/sections/{sectionKey}/genre/{genreId} - for genre browsing
+    const genreMatch = path.match(/library\/sections\/([^/]+)\/genre\/([^/]+)/);
+    
+    // Pattern: /library/sections/{sectionKey}/year/{year} - for year browsing  
+    const yearMatch = path.match(/library\/sections\/([^/]+)\/year\/([^/]+)/);
+    
+    // Pattern: /library/sections/{sectionKey}/all - for all items in section
+    const allMatch = path.match(/library\/sections\/([^/]+)\/all/);
+
     if (childrenMatch) {
       const parentId = childrenMatch[1];
       logger.info('[Emby /dir] Fetching children for parentId:', parentId);
@@ -809,7 +836,81 @@ router.get('/dir/*', requireAuth, async (req: AuthenticatedRequest, res: Respons
       }
       
       res.json({ Metadata: items, Directory: [] });
+    } else if (genreMatch) {
+      // Handle genre browsing: /library/sections/{sectionKey}/genre/{genreId}
+      const sectionKey = genreMatch[1];
+      const genreId = genreMatch[2];
+      logger.info('[Emby /dir] Fetching items by genre:', genreId, 'in section:', sectionKey);
+      
+      const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
+        params: {
+          ParentId: sectionKey,
+          GenreIds: genreId,
+          Recursive: true,
+          Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
+          ImageTypeLimit: 1,
+          EnableImageTypes: 'Primary,Backdrop,Thumb',
+          Limit: 50,
+        },
+        headers: {
+          'Accept': 'application/json',
+          'X-Emby-Authorization': getEmbyAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      });
+
+      const items = (response.data.Items || []).map((item: any) => normalizeEmbyItem(item, client.baseUrl));
+      logger.info('[Emby /dir] Genre items count:', items.length);
+      res.json({ Metadata: items, Directory: [] });
+    } else if (yearMatch) {
+      // Handle year browsing: /library/sections/{sectionKey}/year/{year}
+      const sectionKey = yearMatch[1];
+      const year = yearMatch[2];
+      logger.info('[Emby /dir] Fetching items by year:', year, 'in section:', sectionKey);
+      
+      const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
+        params: {
+          ParentId: sectionKey,
+          Years: year,
+          Recursive: true,
+          Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
+          ImageTypeLimit: 1,
+          EnableImageTypes: 'Primary,Backdrop,Thumb',
+          Limit: 50,
+        },
+        headers: {
+          'Accept': 'application/json',
+          'X-Emby-Authorization': getEmbyAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      });
+
+      const items = (response.data.Items || []).map((item: any) => normalizeEmbyItem(item, client.baseUrl));
+      logger.info('[Emby /dir] Year items count:', items.length);
+      res.json({ Metadata: items, Directory: [] });
+    } else if (allMatch) {
+      // Handle all items: /library/sections/{sectionKey}/all
+      const sectionKey = allMatch[1];
+      logger.info('[Emby /dir] Fetching all items in section:', sectionKey);
+      
+      const response = await axios.get(`${client.baseUrl}/Users/${client.userId}/Items`, {
+        params: {
+          ParentId: sectionKey,
+          Recursive: true,
+          Fields: 'Overview,Genres,CommunityRating,RunTimeTicks,PremiereDate,ProductionYear',
+          ImageTypeLimit: 1,
+          EnableImageTypes: 'Primary,Backdrop,Thumb',
+          Limit: 100,
+        },
+        headers: {
+          'Accept': 'application/json',
+          'X-Emby-Authorization': getEmbyAuthHeader(client.clientId, 'Flixor Web', client.accessToken),
+        },
+      });
+
+      const items = (response.data.Items || []).map((item: any) => normalizeEmbyItem(item, client.baseUrl));
+      logger.info('[Emby /dir] All items count:', items.length);
+      res.json({ Metadata: items, Directory: [] });
     } else {
+      logger.warn('[Emby /dir] Unhandled path pattern:', path);
       res.json({ Metadata: [], Directory: [] });
     }
   } catch (error: any) {

@@ -148,6 +148,7 @@ export default function Home() {
         try {
           const deck: any = await plexBackendContinue();
           const meta = deck?.MediaContainer?.Metadata || [];
+          console.log('[Home] Continue watching raw items:', meta.map((m: any) => ({ ratingKey: m.ratingKey, title: m.title, type: m.type })));
           const items: any[] = meta.slice(0, 10).map((m: any, i: number) => {
             const p = m.thumb || m.parentThumb || m.grandparentThumb || m.art;
             // Use full URL for Jellyfin/Emby, proxy for Plex
@@ -155,7 +156,9 @@ export default function Home() {
             const duration = (m.duration || 0) / 1000;
             const vo = (m.viewOffset || 0) / 1000;
             const progress = duration > 0 ? Math.min(100, Math.max(1, Math.round((vo / duration) * 100))) : 0;
-            return { id: `media:${String(m.ratingKey || i)}`, title: m.title || m.grandparentTitle || 'Continue', image: img, progress };
+            const itemId = `plex:${String(m.ratingKey || i)}`;
+            console.log(`[Home] Continue item ${i}: id=${itemId}, ratingKey=${m.ratingKey}, title=${m.title}`);
+            return { id: itemId, title: m.title || m.grandparentTitle || 'Continue', image: img, progress };
           });
           if (items.length > 0) {
             rowsData.splice(1, 0, { title: 'Continue Watching', items: items as any, variant: 'continue' });
@@ -197,7 +200,7 @@ export default function Home() {
                   const p = m.thumb || m.parentThumb || m.grandparentThumb || m.art;
                   // Use full URL for Jellyfin/Emby, proxy for Plex
                   const img = p?.startsWith('http') ? p : apiClient.getPlexImageNoToken(p || '');
-                  return { id: `media:${m.ratingKey}`, title: m.title || m.grandparentTitle || 'Title', image: img };
+                  return { id: `plex:${m.ratingKey}`, title: m.title || m.grandparentTitle || 'Title', image: img };
                 });
                 const row: any = { title: gr.label, items };
                 row.browseKey = path;

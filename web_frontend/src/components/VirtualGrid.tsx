@@ -71,7 +71,7 @@ export default function VirtualGrid({ items, rowHeight = 280, columnWidth = 160,
         if (!item) break;
         out.push({
           item,
-          key: item.id,
+          key: `${item.id}-${idx}`,
           style: {
             position: 'absolute',
             top: r * (rowHeight + gap),
